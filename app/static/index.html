@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sea Routing FMM Demo</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --bg-color: #f8fafc;
+            --surface: #ffffff;
+            --text-main: #0f172a;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --error: #ef4444;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            height: 100vh;
+            color: var(--text-main);
+            background: var(--bg-color);
+        }
+
+        /* Sidebar UI */
+        .sidebar {
+            width: 380px;
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            padding: 24px;
+            box-shadow: 4px 0 15px rgba(0,0,0,0.03);
+            z-index: 1000;
+        }
+
+        .header h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
+        .header p { font-size: 0.875rem; color: var(--text-muted); margin-bottom: 2rem; }
+
+        .control-group { margin-bottom: 1.5rem; }
+        .control-group label {
+            display: block;
+            font-size: 0.875rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: var(--text-main);
+        }
+
+        .input-row {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 0.875rem;
+            background: var(--bg-color);
+            transition: border-color 0.2s;
+        }
+        input[readonly] { cursor: not-allowed; opacity: 0.8; }
+
+        .btn {
+            width: 100%;
+            padding: 12px;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+        }
+        .btn:hover { background: var(--primary-hover); }
+        .btn:active { transform: scale(0.98); }
+        .btn:disabled { background: var(--text-muted); cursor: not-allowed; }
+
+        /* Results panel */
+        .results {
+            margin-top: 2rem;
+            padding: 16px;
+            background: var(--bg-color);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            display: none;
+        }
+        .results.active { display: block; }
+        .results h3 { font-size: 1rem; margin-bottom: 12px; }
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 0.875rem; }
+        .stat-value { font-weight: 600; }
+        
+        .error-msg {
+            color: var(--error);
+            font-size: 0.875rem;
+            margin-top: 1rem;
+            display: none;
+        }
+
+        /* Map area */
+        #map { flex: 1; height: 100%; background: #c5e8ff; }
+        
+        /* Helper instruction */
+        .instruction { font-size: 0.8rem; color: var(--primary); margin-top: 4px; display: block; }
+    </style>
+</head>
+<body>
+
+    <aside class="sidebar">
+        <div class="header">
+            <h1>Maritime Route Finder</h1>
+            <p>Тестовый интерфейс алгоритма поверх растра АИС (A* Spherical)</p>
+        </div>
+
+        <div class="control-group">
+            <label>Точка А (Старт)</label>
+            <div class="input-row">
+                <input type="text" id="start-lat" placeholder="Широта" readonly>
+                <input type="text" id="start-lon" placeholder="Долгота" readonly>
+            </div>
+            <span class="instruction">Кликните на карту, чтобы задать</span>
+        </div>
+
+        <div class="control-group">
+            <label>Точка Б (Финиш)</label>
+            <div class="input-row">
+                <input type="text" id="end-lat" placeholder="Широта" readonly>
+                <input type="text" id="end-lon" placeholder="Долгота" readonly>
+            </div>
+            <span class="instruction">Кликните на карту, чтобы задать</span>
+        </div>
+
+        <button class="btn" id="calc-btn" disabled>Построить маршрут</button>
+        <div id="error-box" class="error-msg"></div>
+
+        <div class="results" id="results-panel">
+            <h3>Атрибуты маршрута</h3>
+            <div class="stat-row">
+                <span>Протяженность:</span>
+                <span class="stat-value" id="res-dist">0 км</span>
+            </div>
+            <div class="stat-row">
+                <span>Время в пути:</span>
+                <span class="stat-value" id="res-time">0 ч</span>
+            </div>
+            <div class="stat-row">
+                <span>Средняя скорость:</span>
+                <span class="stat-value" id="res-speed">0 км/ч</span>
+            </div>
+        </div>
+    </aside>
+
+    <main id="map"></main>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Инициализация карты
+        const map = L.map('map').setView([45.0, 10.0], 3);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+            maxZoom: 12
+        }).addTo(map);
+
+        // Загрузка и отображение маски морей/океанов
+        fetch('/static/oceans-seas.geo.json')
+            .then(res => res.json())
+            .then(data => {
+                L.geoJSON(data, {
+                    style: {
+                        color: '#3b82f6',      // Цвет границы
+                        weight: 1,
+                        fillColor: '#60a5fa',  // Цвет заливки
+                        fillOpacity: 0.35      // Полупрозрачность для видимости карты
+                    }
+                }).addTo(map);
+            })
+            .catch(err => console.error("Ошибка загрузки маски:", err));
+
+        // State UI
+        let currentStep = 'start'; 
+        const coords = { start: null, end: null };
+        const markers = { start: null, end: null };
+        let routeLayer = null;
+
+        const inputs = {
+            startLat: document.getElementById('start-lat'),
+            startLon: document.getElementById('start-lon'),
+            endLat: document.getElementById('end-lat'),
+            endLon: document.getElementById('end-lon')
+        };
+        const calcBtn = document.getElementById('calc-btn');
+        const resultsPanel = document.getElementById('results-panel');
+        const errorBox = document.getElementById('error-box');
+
+        // Обработка клика
+        map.on('click', (e) => {
+            // Нормализуем долготу (в пределах от -180 до 180), на случай если пользователь проскроллил карту вбок
+            let lng = e.latlng.lng;
+            while (lng > 180) lng -= 360;
+            while (lng < -180) lng += 360;
+
+            const lat = Math.max(-90, Math.min(90, e.latlng.lat)).toFixed(4);
+            const lon = lng.toFixed(4);
+
+            if (currentStep === 'start') {
+                coords.start = { lat: parseFloat(lat), lon: parseFloat(lon) };
+                inputs.startLat.value = lat;
+                inputs.startLon.value = lon;
+                
+                if (markers.start) map.removeLayer(markers.start);
+                markers.start = L.marker([lat, lon]).addTo(map).bindPopup("Старт").openPopup();
+                
+                currentStep = 'end';
+            } 
+            else if (currentStep === 'end' || currentStep === 'ready') {
+                coords.end = { lat: parseFloat(lat), lon: parseFloat(lon) };
+                inputs.endLat.value = lat;
+                inputs.endLon.value = lon;
+                
+                if (markers.end) map.removeLayer(markers.end);
+                markers.end = L.marker([lat, lon]).addTo(map).bindPopup("Финиш").openPopup();
+                
+                currentStep = 'ready';
+                calcBtn.disabled = false;
+                errorBox.style.display = 'none';
+            }
+        });
+
+        // Отправка запроса
+        calcBtn.addEventListener('click', async () => {
+            if (!coords.start || !coords.end) return;
+
+            if (routeLayer) map.removeLayer(routeLayer);
+            resultsPanel.classList.remove('active');
+            errorBox.style.display = 'none';
+            
+            calcBtn.disabled = true;
+            calcBtn.innerText = 'Вычисление...';
+
+            try {
+                const response = await fetch('/api/route', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        start_lon: coords.start.lon,
+                        start_lat: coords.start.lat,
+                        end_lon: coords.end.lon,
+                        end_lat: coords.end.lat
+                    })
+                });
+
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail || 'Ошибка построения маршрута');
+                }
+
+                const geojson = await response.json();
+                
+                routeLayer = L.geoJSON(geojson, {
+                    style: { color: 'var(--primary)', weight: 5, opacity: 0.9, dashArray: '8, 8' }
+                }).addTo(map);
+
+                map.fitBounds(routeLayer.getBounds(), { padding: [50, 50] });
+
+                document.getElementById('res-dist').innerText = geojson.properties.distance_km + ' км';
+                document.getElementById('res-time').innerText = geojson.properties.time_hours + ' ч';
+                document.getElementById('res-speed').innerText = geojson.properties.avg_speed_kmh + ' км/ч';
+                resultsPanel.classList.add('active');
+
+            } catch (error) {
+                errorBox.innerText = error.message;
+                errorBox.style.display = 'block';
+            } finally {
+                calcBtn.disabled = false;
+                calcBtn.innerText = 'Построить маршрут';
+                currentStep = 'start'; 
+            }
+        });
+    </script>
+</body>
+</html>
