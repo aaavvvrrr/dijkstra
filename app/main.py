@@ -1,85 +1,79 @@
 import os
-import json
-import numpy as np
-from fastapi import FastAPI, HTTPException
+import warnings
+
+# Гасим ворнинги от rio-tiler (про float32 и PNG)
+warnings.filterwarnings("ignore", category=UserWarning)
+
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Optional
 
-from shapely.geometry import shape
-import rasterio.features
-from rasterio.transform import from_bounds
-
+from rio_tiler.io import Reader
 from core import SphericalRasterRouter
 
 app = FastAPI(title="Maritime Routing API")
 
-# Глобальные координаты для всей планеты
-LAT_BOUNDS = (-90.0, 90.0)
-LON_BOUNDS = (-180.0, 180.0)
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-GEOJSON_PATH = os.path.join(STATIC_DIR, "oceans-seas.geo.json")
+DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "processed"))
 
-def create_raster_from_geojson() -> np.ndarray:
-    """Читает GeoJSON маску океанов и превращает её в numpy-растр."""
-    if not os.path.exists(GEOJSON_PATH):
-        raise FileNotFoundError(f"Файл {GEOJSON_PATH} не найден в папке static.")
+eff_vel_path = os.path.join(DATA_DIR, "effective_velocity_knots.tif")
+eff_sd_path = os.path.join(DATA_DIR, "effective_sd_knots.tif")
 
-    print("Загрузка и растеризация GeoJSON... (это займет пару секунд)")
-    with open(GEOJSON_PATH, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    
-    # Извлекаем все полигоны из GeoJSON
-    if 'features' in data:
-        geometries = [shape(feature['geometry']) for feature in data['features']]
-    else:
-        geometries = [shape(data)]
+try:
+    router_instance = SphericalRasterRouter(eff_vel_path, eff_sd_path)
+except Exception as e:
+    print(f"ОШИБКА: {e}")
+    router_instance = None
 
-    # Задаем размер сетки. 900x1800 дает шаг сетки 0.2 градуса (~22 км на экваторе)
-    # Этого достаточно для быстрого тестирования. 
-    rows, cols = 900, 1800
-    
-    # Настраиваем трансформацию координат (west, south, east, north)
-    transform = from_bounds(-180.0, -90.0, 180.0, 90.0, cols, rows)
-    
-    # Растеризуем геометрию: Море = 30.0 км/ч, Суша = 0.0
-    raster = rasterio.features.rasterize(
-        geometries,
-        out_shape=(rows, cols),
-        transform=transform,
-        fill=0.0,             # Фон (суша)
-        default_value=30.0,   # Значение внутри полигонов (океан)
-        dtype=np.float32
-    )
-    print("Растеризация успешно завершена!")
-    return raster
-
-# Инициализируем маршрутизатор
-router_instance = SphericalRasterRouter(create_raster_from_geojson(), LAT_BOUNDS, LON_BOUNDS)
-
-# --- Модели API ---
 class RouteRequest(BaseModel):
-    start_lon: float
-    start_lat: float
-    end_lon: float
-    end_lat: float
+    start_lon: float = Field(...)
+    start_lat: float = Field(...)
+    end_lon: float = Field(...)
+    end_lat: float = Field(...)
+    
+    vessel_type: str = Field(default="all")
+    vessel_length: Optional[float] = Field(default=None)
+    vessel_width: Optional[float] = Field(default=None)
+    vessel_draft: Optional[float] = Field(default=None)
+    allow_suez: bool = Field(default=True)
+    avoid_seca: bool = Field(default=False)
 
 @app.post("/api/route")
 async def calculate_route(req: RouteRequest):
+    if not router_instance: raise HTTPException(status_code=500, detail="Бэкенд не инициализирован")
+
     try:
+        # Вызываем с дефолтным таймаутом 15 секунд (можно передать max_search_time=20.0, если нужно больше)
         result = router_instance.find_route(
             (req.start_lon, req.start_lat),
             (req.end_lon, req.end_lat)
         )
-        if not result:
-            raise HTTPException(status_code=404, detail="Маршрут не найден. Возможно, путь прегражден сушей.")
-        return result.to_geojson()
+        if not result: raise HTTPException(status_code=404, detail="Путь прегражден сушей.")
+        
+        return result.to_geojson(request_params=req.model_dump())
+        
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except TimeoutError as e:
+        # Перехватываем наш кастомный таймаут
+        raise HTTPException(status_code=408, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка сервера: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-# --- Раздача Frontend ---
+@app.get("/tiles/{layer}/{z}/{x}/{y}.png")
+def get_tile(layer: str, z: int, x: int, y: int):
+    filepath = eff_vel_path if layer == "speed" else eff_sd_path
+    if not os.path.exists(filepath): return Response(status_code=404)
+    try:
+        with Reader(filepath) as src:
+            img = src.tile(x, y, z)
+            png_bytes = img.render(img_format="PNG", colormap_name="viridis", rescale=((0, 30),))
+            return Response(content=png_bytes, media_type="image/png")
+    except Exception:
+        return Response(status_code=204)
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/")
@@ -88,6 +82,5 @@ async def serve_index():
 
 if __name__ == "__main__":
     import uvicorn
-    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    os.chdir(script_dir)
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # ИСПРАВЛЕНИЕ ДВОЙНОЙ ЗАГРУЗКИ: передаем инстанс app вместо строки "main:app"
+    uvicorn.run(app, host="0.0.0.0", port=8000)

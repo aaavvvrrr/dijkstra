@@ -98,7 +98,7 @@
         .results h3 { font-size: 1rem; margin-bottom: 12px; }
         .stat-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 0.875rem; }
         .stat-value { font-weight: 600; }
-        
+
         .error-msg {
             color: var(--error);
             font-size: 0.875rem;
@@ -108,7 +108,7 @@
 
         /* Map area */
         #map { flex: 1; height: 100%; background: #c5e8ff; }
-        
+
         /* Helper instruction */
         .instruction { font-size: 0.8rem; color: var(--primary); margin-top: 4px; display: block; }
     </style>
@@ -149,12 +149,22 @@
                 <span class="stat-value" id="res-dist">0 км</span>
             </div>
             <div class="stat-row">
-                <span>Время в пути:</span>
-                <span class="stat-value" id="res-time">0 ч</span>
-            </div>
-            <div class="stat-row">
                 <span>Средняя скорость:</span>
                 <span class="stat-value" id="res-speed">0 км/ч</span>
+            </div>
+
+            <h3 style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px;">Прогноз времени (Монте-Карло)</h3>
+            <div class="stat-row" style="color: #10b981;">
+                <span>Оптимистичный (5%):</span>
+                <span class="stat-value" id="res-time-opt">0 ч</span>
+            </div>
+            <div class="stat-row" style="font-size: 1rem; color: var(--primary);">
+                <span>Ожидаемое (Среднее):</span>
+                <span class="stat-value" id="res-time-mean">0 ч</span>
+            </div>
+            <div class="stat-row" style="color: #ef4444;">
+                <span>Пессимистичный (95%):</span>
+                <span class="stat-value" id="res-time-pess">0 ч</span>
             </div>
         </div>
     </aside>
@@ -165,11 +175,31 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
         // Инициализация карты
-        const map = L.map('map').setView([45.0, 10.0], 3);
-        L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-            attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
-            maxZoom: 12
+        const map = L.map('map').setView([45.0, 10.0], 4);
+
+        // Базовая подложка
+        const baseMap = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; CARTO'
         }).addTo(map);
+
+        // Подключаем наши динамические растры из FastAPI Tile Server!
+        const effSpeedLayer = L.tileLayer('/tiles/speed/{z}/{x}/{y}.png', {
+            opacity: 0.85, maxZoom: 10
+        });
+
+        const effSdLayer = L.tileLayer('/tiles/sd/{z}/{x}/{y}.png', {
+            opacity: 0.85, maxZoom: 10
+        });
+
+        // Добавляем контроллер (Включалки) в правый верхний угол
+        const overlayMaps = {
+            "Растр: Эффективная Скорость": effSpeedLayer,
+            "Растр: Дисперсия (SD)": effSdLayer
+        };
+        L.control.layers({"Базовая карта": baseMap}, overlayMaps, {collapsed: false}).addTo(map);
+
+        // По умолчанию включим слой скорости, чтобы видеть, куда кликать!
+        effSpeedLayer.addTo(map);
 
         // Загрузка и отображение маски морей/океанов
         fetch('/static/oceans-seas.geo.json')
@@ -187,7 +217,7 @@
             .catch(err => console.error("Ошибка загрузки маски:", err));
 
         // State UI
-        let currentStep = 'start'; 
+        let currentStep = 'start';
         const coords = { start: null, end: null };
         const markers = { start: null, end: null };
         let routeLayer = null;
@@ -216,20 +246,20 @@
                 coords.start = { lat: parseFloat(lat), lon: parseFloat(lon) };
                 inputs.startLat.value = lat;
                 inputs.startLon.value = lon;
-                
+
                 if (markers.start) map.removeLayer(markers.start);
                 markers.start = L.marker([lat, lon]).addTo(map).bindPopup("Старт").openPopup();
-                
+
                 currentStep = 'end';
-            } 
+            }
             else if (currentStep === 'end' || currentStep === 'ready') {
                 coords.end = { lat: parseFloat(lat), lon: parseFloat(lon) };
                 inputs.endLat.value = lat;
                 inputs.endLon.value = lon;
-                
+
                 if (markers.end) map.removeLayer(markers.end);
                 markers.end = L.marker([lat, lon]).addTo(map).bindPopup("Финиш").openPopup();
-                
+
                 currentStep = 'ready';
                 calcBtn.disabled = false;
                 errorBox.style.display = 'none';
@@ -243,7 +273,7 @@
             if (routeLayer) map.removeLayer(routeLayer);
             resultsPanel.classList.remove('active');
             errorBox.style.display = 'none';
-            
+
             calcBtn.disabled = true;
             calcBtn.innerText = 'Вычисление...';
 
@@ -265,16 +295,40 @@
                 }
 
                 const geojson = await response.json();
-                
+            
+                // Отрисовка маршрута
                 routeLayer = L.geoJSON(geojson, {
                     style: { color: 'var(--primary)', weight: 5, opacity: 0.9, dashArray: '8, 8' }
                 }).addTo(map);
 
                 map.fitBounds(routeLayer.getBounds(), { padding: [50, 50] });
 
-                document.getElementById('res-dist').innerText = geojson.properties.distance_km + ' км';
-                document.getElementById('res-time').innerText = geojson.properties.time_hours + ' ч';
-                document.getElementById('res-speed').innerText = geojson.properties.avg_speed_kmh + ' км/ч';
+                // --- ИСПРАВЛЕНИЕ КЛЮЧЕЙ И ОБНОВЛЕНИЕ UI ---
+                const props = geojson.properties;
+                
+                document.getElementById('res-dist').innerText = props.distance_total_km + ' км';
+                document.getElementById('res-speed').innerText = props.avg_speed_kmh + ' км/ч';
+                
+                // Метрики Монте-Карло
+                document.getElementById('res-time-opt').innerText = props.time_optimistic_hours + ' ч';
+                document.getElementById('res-time-mean').innerText = props.time_total_hours + ' ч';
+                document.getElementById('res-time-pess').innerText = props.time_pessimistic_hours + ' ч';
+                
+                // --- АВТО-СНЭППИНГ МАРКЕРОВ ---
+                // Если алгоритм "дотянул" клик с суши до ближайшей воды, двигаем маркеры на карте
+                if (props.actual_start_lonlat) {
+                    const [lon, lat] = props.actual_start_lonlat;
+                    markers.start.setLatLng([lat, lon]);
+                    inputs.startLat.value = lat.toFixed(4);
+                    inputs.startLon.value = lon.toFixed(4);
+                }
+                if (props.actual_end_lonlat) {
+                    const [lon, lat] = props.actual_end_lonlat;
+                    markers.end.setLatLng([lat, lon]);
+                    inputs.endLat.value = lat.toFixed(4);
+                    inputs.endLon.value = lon.toFixed(4);
+                }
+
                 resultsPanel.classList.add('active');
 
             } catch (error) {
