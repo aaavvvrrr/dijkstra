@@ -1,14 +1,16 @@
 import os
+import asyncio
 import warnings
-
-# Гасим ворнинги от rio-tiler (про float32 и PNG)
+import io
 warnings.filterwarnings("ignore", category=UserWarning)
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from typing import Optional
+from PIL import Image
+import numpy as np
 
 from rio_tiler.io import Reader
 from core import SphericalRasterRouter
@@ -33,54 +35,139 @@ class RouteRequest(BaseModel):
     end_lon: float = Field(...)
     end_lat: float = Field(...)
     
-    vessel_type: str = Field(default="all")
-    vessel_length: Optional[float] = Field(default=None)
-    vessel_width: Optional[float] = Field(default=None)
-    vessel_draft: Optional[float] = Field(default=None)
-    allow_suez: bool = Field(default=True)
-    avoid_seca: bool = Field(default=False)
+# =======================================================
+# API ОТЛАДКИ РАСТРА
+# =======================================================
+@app.get("/api/debug/bounds")
+def get_debug_bounds():
+    if not router_instance: return {}
+    return {
+        "min_lat": router_instance.min_lat,
+        "max_lat": router_instance.max_lat,
+        "min_lon": router_instance.min_lon,
+        "max_lon": router_instance.max_lon
+    }
 
-@app.post("/api/route")
-async def calculate_route(req: RouteRequest):
-    if not router_instance: raise HTTPException(status_code=500, detail="Бэкенд не инициализирован")
+@app.get("/api/debug/coarse_grid.png")
+def get_coarse_grid_png():
+    if not router_instance: return Response(status_code=500)
+    
+    comp = router_instance.components
+    main_id = router_instance.main_ocean_id
+    
+    img_arr = np.zeros((comp.shape[0], comp.shape[1], 4), dtype=np.uint8)
+    # Синий для Мирового океана
+    img_arr[comp == main_id] = [59, 130, 246, 180]
+    # Красный для изолированных морей/озер
+    img_arr[(comp > 0) & (comp != main_id)] = [239, 68, 68, 200]
+    
+    img = Image.fromarray(img_arr)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
+
+# =======================================================
+# WEBSOCKETS И TILE SERVER
+# =======================================================
+@app.websocket("/api/ws/route")
+async def websocket_route(websocket: WebSocket):
+    await websocket.accept()
+    if not router_instance:
+        await websocket.send_json({"type": "error", "message": "Бэкенд не инициализирован"})
+        await websocket.close()
+        return
+
+    cancel_flag = False
+    def is_cancelled(): return cancel_flag
+
+    async def on_progress(explored: int, current_path: list, time_val: float):
+        clean_path = [[float(p[0]), float(p[1])] for p in current_path]
+        await websocket.send_json({"type": "progress", "explored": explored, "current_time": float(time_val), "path": clean_path})
+
+    async def listen_for_cancel():
+        nonlocal cancel_flag
+        try:
+            while True:
+                msg = await websocket.receive_json()
+                if msg.get("action") == "cancel": cancel_flag = True
+        except WebSocketDisconnect:
+            cancel_flag = True
 
     try:
-        # Вызываем с дефолтным таймаутом 15 секунд (можно передать max_search_time=20.0, если нужно больше)
-        result = router_instance.find_route(
-            (req.start_lon, req.start_lat),
-            (req.end_lon, req.end_lat)
-        )
-        if not result: raise HTTPException(status_code=404, detail="Путь прегражден сушей.")
-        
-        return result.to_geojson(request_params=req.model_dump())
-        
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except TimeoutError as e:
-        # Перехватываем наш кастомный таймаут
-        raise HTTPException(status_code=408, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        msg = await websocket.receive_json()
+        if msg.get("action") == "start":
+            listener_task = asyncio.create_task(listen_for_cancel())
+            try:
+                result = await router_instance.find_route(
+                    (msg["start_lon"], msg["start_lat"]),
+                    (msg["end_lon"], msg["end_lat"]),
+                    progress_callback=on_progress,
+                    check_cancel_callback=is_cancelled
+                )
+                if result:
+                    await websocket.send_json({"type": "result", "geojson": result.to_geojson(request_params=msg)})
+            except InterruptedError as e:
+                await websocket.send_json({"type": "info", "message": str(e)})
+            except ValueError as e:
+                await websocket.send_json({"type": "error", "message": str(e)})
+            except Exception as e:
+                await websocket.send_json({"type": "error", "message": f"Ошибка сервера: {str(e)}"})
+            finally:
+                listener_task.cancel()
+    except WebSocketDisconnect: pass
+
+# Замените эндпоинт get_tile на этот код:
 
 @app.get("/tiles/{layer}/{z}/{x}/{y}.png")
 def get_tile(layer: str, z: int, x: int, y: int):
-    filepath = eff_vel_path if layer == "speed" else eff_sd_path
-    if not os.path.exists(filepath): return Response(status_code=404)
+    # Выбираем правильный файл
+    if layer == "speed":
+        filepath = eff_vel_path
+    elif layer == "sd":
+        filepath = eff_sd_path
+    elif layer == "debug":
+        filepath = router_instance.debug_tif_path if router_instance else None
+    else:
+        return Response(status_code=404)
+
+    if not filepath or not os.path.exists(filepath): 
+        return Response(status_code=404)
+
     try:
         with Reader(filepath) as src:
-            img = src.tile(x, y, z)
-            png_bytes = img.render(img_format="PNG", colormap_name="viridis", rescale=((0, 30),))
+            # Магия здесь: nodata=0 автоматически маскирует нули (сушу) в прозрачность!
+            img = src.tile(x, y, z, nodata=0)
+            
+            if layer == "debug":
+                # Кастомная раскраска: Мировой океан - синий, изолированные озера - красные
+                cmap = {0: (0, 0, 0, 0)} # Суша прозрачная
+                for i in range(1, router_instance.num_features + 2):
+                    if i == router_instance.main_ocean_id:
+                        cmap[i] = (59, 130, 246, 180) # Синий
+                    else:
+                        cmap[i] = (239, 68, 68, 200)  # Красный
+                png_bytes = img.render(img_format="PNG", colormap=cmap)
+                
+            elif layer == "speed":
+                # turbo - от синего (медленно) к красному (быстро)
+                png_bytes = img.render(img_format="PNG", colormap_name="turbo", rescale=((5, 30),))
+            else:
+                # plasma - от темно-фиолетового к желтому (высокая дисперсия)
+                png_bytes = img.render(img_format="PNG", colormap_name="plasma", rescale=((0, 5),))
+                
             return Response(content=png_bytes, media_type="image/png")
-    except Exception:
-        return Response(status_code=204)
+            
+    except Exception as e:
+        import traceback
+        print(f"❌ ОШИБКА РЕНДЕРА ТАЙЛА '{layer}' (z={z}, x={x}, y={y}):")
+        traceback.print_exc()
+        return Response(status_code=204)    
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/")
-async def serve_index():
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+async def serve_index(): return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 if __name__ == "__main__":
     import uvicorn
-    # ИСПРАВЛЕНИЕ ДВОЙНОЙ ЗАГРУЗКИ: передаем инстанс app вместо строки "main:app"
     uvicorn.run(app, host="0.0.0.0", port=8000)

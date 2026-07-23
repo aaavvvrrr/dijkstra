@@ -139,7 +139,10 @@
             <span class="instruction">Кликните на карту, чтобы задать</span>
         </div>
 
-        <button class="btn" id="calc-btn" disabled>Построить маршрут</button>
+        <div style="display: flex; gap: 8px;">
+            <button class="btn" id="calc-btn" disabled>Построить маршрут</button>
+            <button class="btn" id="cancel-btn" style="background: var(--error); display: none;">Прервать</button>
+        </div>
         <div id="error-box" class="error-msg"></div>
 
         <div class="results" id="results-panel">
@@ -182,45 +185,55 @@
             attribution: '&copy; CARTO'
         }).addTo(map);
 
-        // Подключаем наши динамические растры из FastAPI Tile Server!
-        const effSpeedLayer = L.tileLayer('/tiles/speed/{z}/{x}/{y}.png', {
-            opacity: 0.85, maxZoom: 10
-        });
+        // Подключаем наши динамические растры из FastAPI Tile Server
+        const effSpeedLayer = L.tileLayer('/tiles/speed/{z}/{x}/{y}.png', { opacity: 0.8, maxZoom: 10 });
+        const effSdLayer = L.tileLayer('/tiles/sd/{z}/{x}/{y}.png', { opacity: 0.8, maxZoom: 10 });
+        const debugGridLayer = L.tileLayer('/tiles/debug/{z}/{x}/{y}.png', { opacity: 0.7, maxZoom: 10 });
 
-        const effSdLayer = L.tileLayer('/tiles/sd/{z}/{x}/{y}.png', {
-            opacity: 0.85, maxZoom: 10
-        });
-
-        // Добавляем контроллер (Включалки) в правый верхний угол
         const overlayMaps = {
-            "Растр: Эффективная Скорость": effSpeedLayer,
-            "Растр: Дисперсия (SD)": effSdLayer
+            "Детализация: Скорость": effSpeedLayer,
+            "Детализация: Дисперсия": effSdLayer,
+            "Связность морей (Грубая)": debugGridLayer
         };
         L.control.layers({"Базовая карта": baseMap}, overlayMaps, {collapsed: false}).addTo(map);
 
-        // По умолчанию включим слой скорости, чтобы видеть, куда кликать!
+        // По умолчанию включим скорость
         effSpeedLayer.addTo(map);
 
-        // Загрузка и отображение маски морей/океанов
+        // Загрузка векторной маски (Контуры берегов)
         fetch('/static/oceans-seas.geo.json')
             .then(res => res.json())
             .then(data => {
                 L.geoJSON(data, {
                     style: {
-                        color: '#3b82f6',      // Цвет границы
+                        color: '#3b82f6',
                         weight: 1,
-                        fillColor: '#60a5fa',  // Цвет заливки
-                        fillOpacity: 0.35      // Полупрозрачность для видимости карты
+                        fillColor: 'transparent', // Убрал синюю заливку, чтобы не мешала смотреть растры!
+                        fillOpacity: 0
                     }
                 }).addTo(map);
             })
             .catch(err => console.error("Ошибка загрузки маски:", err));
 
+        // --- МАГИЯ ОТЛАДКИ СВЯЗНОСТИ МОРЕЙ ---
+        // fetch('/api/debug/bounds')
+        //     .then(res => res.json())
+        //     .then(b => {
+        //         const bounds = [[b.min_lat, b.min_lon], [b.max_lat, b.max_lon]];
+        //         const coarseLayer = L.imageOverlay('/api/debug/coarse_grid.png', bounds, {opacity: 0.6});
+        //         layerControl.addOverlay(coarseLayer, "Отладка: Связность морей (Грубая)");
+        //         // Раскомментируйте ниже, чтобы слой включался сразу
+        //         // coarseLayer.addTo(map); 
+        //     })
+        //     .catch(err => console.error("Ошибка загрузки грубой сетки:", err));
+
         // State UI
-        let currentStep = 'start';
+        let currentStep = 'start'; 
         const coords = { start: null, end: null };
         const markers = { start: null, end: null };
         let routeLayer = null;
+        let progressPolyline = null; // Слой для "щупальца"
+        let ws = null;
 
         const inputs = {
             startLat: document.getElementById('start-lat'),
@@ -229,12 +242,12 @@
             endLon: document.getElementById('end-lon')
         };
         const calcBtn = document.getElementById('calc-btn');
+        const cancelBtn = document.getElementById('cancel-btn');
         const resultsPanel = document.getElementById('results-panel');
         const errorBox = document.getElementById('error-box');
 
         // Обработка клика
         map.on('click', (e) => {
-            // Нормализуем долготу (в пределах от -180 до 180), на случай если пользователь проскроллил карту вбок
             let lng = e.latlng.lng;
             while (lng > 180) lng -= 360;
             while (lng < -180) lng += 360;
@@ -242,103 +255,145 @@
             const lat = Math.max(-90, Math.min(90, e.latlng.lat)).toFixed(4);
             const lon = lng.toFixed(4);
 
-            if (currentStep === 'start') {
+            // Если мы только зашли на страницу ИЛИ если уже построили маршрут (3-й клик)
+            if (currentStep === 'start' || currentStep === 'ready') {
+                
+                // Если это 3-й клик (сброс старого маршрута)
+                if (currentStep === 'ready') {
+                    if (markers.end) map.removeLayer(markers.end);
+                    coords.end = null;
+                    inputs.endLat.value = '';
+                    inputs.endLon.value = '';
+                    calcBtn.disabled = true;
+                    
+                    // Убираем старые линии
+                    if (routeLayer) map.removeLayer(routeLayer);
+                    if (progressPolyline) { map.removeLayer(progressPolyline); progressPolyline = null; }
+                    resultsPanel.classList.remove('active');
+                }
+
                 coords.start = { lat: parseFloat(lat), lon: parseFloat(lon) };
                 inputs.startLat.value = lat;
                 inputs.startLon.value = lon;
-
+                
                 if (markers.start) map.removeLayer(markers.start);
                 markers.start = L.marker([lat, lon]).addTo(map).bindPopup("Старт").openPopup();
-
+                
                 currentStep = 'end';
-            }
-            else if (currentStep === 'end' || currentStep === 'ready') {
+            } 
+            // Второй клик (Установка финиша)
+            else if (currentStep === 'end') {
                 coords.end = { lat: parseFloat(lat), lon: parseFloat(lon) };
                 inputs.endLat.value = lat;
                 inputs.endLon.value = lon;
-
+                
                 if (markers.end) map.removeLayer(markers.end);
                 markers.end = L.marker([lat, lon]).addTo(map).bindPopup("Финиш").openPopup();
-
+                
                 currentStep = 'ready';
                 calcBtn.disabled = false;
                 errorBox.style.display = 'none';
             }
         });
 
-        // Отправка запроса
-        calcBtn.addEventListener('click', async () => {
+        // Отправка сигнала отмены
+        cancelBtn.addEventListener('click', () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: 'cancel' }));
+            }
+        });
+
+        // Запуск расчета через WebSocket
+        calcBtn.addEventListener('click', () => {
             if (!coords.start || !coords.end) return;
 
+            // UI сброс
             if (routeLayer) map.removeLayer(routeLayer);
+            if (progressPolyline) { map.removeLayer(progressPolyline); progressPolyline = null; }
             resultsPanel.classList.remove('active');
             errorBox.style.display = 'none';
-
-            calcBtn.disabled = true;
-            calcBtn.innerText = 'Вычисление...';
-
-            try {
-                const response = await fetch('/api/route', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        start_lon: coords.start.lon,
-                        start_lat: coords.start.lat,
-                        end_lon: coords.end.lon,
-                        end_lat: coords.end.lat
-                    })
-                });
-
-                if (!response.ok) {
-                    const err = await response.json();
-                    throw new Error(err.detail || 'Ошибка построения маршрута');
-                }
-
-                const geojson = await response.json();
             
-                // Отрисовка маршрута
-                routeLayer = L.geoJSON(geojson, {
-                    style: { color: 'var(--primary)', weight: 5, opacity: 0.9, dashArray: '8, 8' }
-                }).addTo(map);
+            calcBtn.style.display = 'none';
+            cancelBtn.style.display = 'block';
 
-                map.fitBounds(routeLayer.getBounds(), { padding: [50, 50] });
+            // Открываем WebSocket
+            const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+            ws = new WebSocket(`${protocol}://${window.location.host}/api/ws/route`);
 
-                // --- ИСПРАВЛЕНИЕ КЛЮЧЕЙ И ОБНОВЛЕНИЕ UI ---
-                const props = geojson.properties;
-                
-                document.getElementById('res-dist').innerText = props.distance_total_km + ' км';
-                document.getElementById('res-speed').innerText = props.avg_speed_kmh + ' км/ч';
-                
-                // Метрики Монте-Карло
-                document.getElementById('res-time-opt').innerText = props.time_optimistic_hours + ' ч';
-                document.getElementById('res-time-mean').innerText = props.time_total_hours + ' ч';
-                document.getElementById('res-time-pess').innerText = props.time_pessimistic_hours + ' ч';
-                
-                // --- АВТО-СНЭППИНГ МАРКЕРОВ ---
-                // Если алгоритм "дотянул" клик с суши до ближайшей воды, двигаем маркеры на карте
-                if (props.actual_start_lonlat) {
-                    const [lon, lat] = props.actual_start_lonlat;
-                    markers.start.setLatLng([lat, lon]);
-                    inputs.startLat.value = lat.toFixed(4);
-                    inputs.startLon.value = lon.toFixed(4);
-                }
-                if (props.actual_end_lonlat) {
-                    const [lon, lat] = props.actual_end_lonlat;
-                    markers.end.setLatLng([lat, lon]);
-                    inputs.endLat.value = lat.toFixed(4);
-                    inputs.endLon.value = lon.toFixed(4);
-                }
-
+            ws.onopen = () => {
+                // Показываем плашку результатов в режиме "Поиск..."
+                document.getElementById('res-dist').innerText = 'Идет поиск...';
+                document.getElementById('res-speed').innerText = '0 узлов';
+                document.getElementById('res-time-opt').innerText = '-';
+                document.getElementById('res-time-mean').innerText = '-';
+                document.getElementById('res-time-pess').innerText = '-';
                 resultsPanel.classList.add('active');
 
-            } catch (error) {
-                errorBox.innerText = error.message;
-                errorBox.style.display = 'block';
-            } finally {
-                calcBtn.disabled = false;
+                // Отправляем старт
+                ws.send(JSON.stringify({
+                    action: "start",
+                    start_lon: coords.start.lon, start_lat: coords.start.lat,
+                    end_lon: coords.end.lon, end_lat: coords.end.lat
+                }));
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.type === 'progress') {
+                    // Обновляем статистику поиска
+                    document.getElementById('res-speed').innerText = data.explored.toLocaleString() + ' проверок';
+                    document.getElementById('res-time-mean').innerText = `Изучаемый путь: ${data.current_time.toFixed(1)} ч.`;
+
+                    // Отрисовываем "Щупальце"
+                    const latlngs = data.path.map(p => [p[1], p[0]]);
+                    if (progressPolyline) {
+                        progressPolyline.setLatLngs(latlngs);
+                    } else {
+                        progressPolyline = L.polyline(latlngs, {color: '#f43f5e', weight: 3, dashArray: '5, 5'}).addTo(map);
+                    }
+                } 
+                else if (data.type === 'result') {
+                    if (progressPolyline) { map.removeLayer(progressPolyline); progressPolyline = null; }
+                    
+                    const geojson = data.geojson;
+                    routeLayer = L.geoJSON(geojson, {
+                        style: { color: 'var(--primary)', weight: 5, opacity: 0.9, dashArray: '8, 8' }
+                    }).addTo(map);
+
+                    map.fitBounds(routeLayer.getBounds(), { padding: [50, 50] });
+
+                    const props = geojson.properties;
+                    document.getElementById('res-dist').innerText = props.distance_total_km + ' км';
+                    document.getElementById('res-speed').innerText = props.avg_speed_kmh + ' км/ч';
+                    document.getElementById('res-time-opt').innerText = props.time_optimistic_hours + ' ч';
+                    document.getElementById('res-time-mean').innerText = props.time_total_hours + ' ч';
+                    document.getElementById('res-time-pess').innerText = props.time_pessimistic_hours + ' ч';
+
+                    if (props.actual_start_lonlat) {
+                        markers.start.setLatLng([props.actual_start_lonlat[1], props.actual_start_lonlat[0]]);
+                    }
+                    if (props.actual_end_lonlat) {
+                        markers.end.setLatLng([props.actual_end_lonlat[1], props.actual_end_lonlat[0]]);
+                    }
+                    ws.close();
+                } 
+                else if (data.type === 'error' || data.type === 'info') {
+                    if (progressPolyline) { map.removeLayer(progressPolyline); progressPolyline = null; }
+                    errorBox.innerText = data.message;
+                    errorBox.style.display = 'block';
+                    errorBox.style.color = data.type === 'info' ? '#eab308' : 'var(--error)';
+                    resultsPanel.classList.remove('active');
+                    ws.close();
+                }
+            };
+
+            ws.onclose = () => {
+                calcBtn.style.display = 'block';
+                cancelBtn.style.display = 'none';
                 calcBtn.innerText = 'Построить маршрут';
                 currentStep = 'start'; 
-            }
+            };
         });
     </script>
 </body>

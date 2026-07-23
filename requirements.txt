@@ -1,6 +1,10 @@
 fastapi
-uvicorn
+uvicorn[standard]
 pydantic
 numpy
+scipy
 shapely
 rasterio
+rio-tiler
+Pillow
+matplotlib
