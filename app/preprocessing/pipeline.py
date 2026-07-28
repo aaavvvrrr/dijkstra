@@ -1,10 +1,13 @@
 import numpy as np
 import rasterio
 from rasterio.features import rasterize
+from rasterio.warp import reproject, Resampling
 import geopandas as gpd
 from scipy.ndimage import gaussian_filter
 from typing import Optional
 import os
+import glob
+import gc
 
 class RasterPreprocessor:
     """
@@ -34,22 +37,105 @@ class RasterPreprocessor:
                 arr[arr == nodata] = 0.0
             return arr
 
-    def _write_raster(self, arr: np.ndarray, filepath: str):
-        """Сохранение итогового растра."""
+    def _write_raster(self, arr: np.ndarray, filepath: str, dtype: str = 'float32', nodata: float = 0.0):
+        """Сохранение итогового растра с настраиваемым типом."""
         out_meta = self.meta.copy()
         out_meta.update({
             "driver": "GTiff",
-            "dtype": 'float32',
+            "dtype": dtype,
             "compress": "deflate",
             "tiled": True,
             "blockxsize": 256,
             "blockysize": 256,
-            "nodata": 0.0
+            "nodata": nodata
         })
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with rasterio.open(filepath, 'w', **out_meta) as dest:
             dest.write(arr, 1)
         print(f"✅ Сохранен файл: {filepath}")
+
+    def process_seca_mask(self, seca_geojson: str, out_seca_tif: str):
+        """Создает растр маски SECA (1 - SECA, 0 - остальное). uint8 для экономии RAM."""
+        if not self.shape or not self.transform:
+            raise ValueError("Сначала проинициализируйте meta, считав базовый растр (через _read_raster)")
+            
+        print(f"🗺️ Генерация маски SECA из: {os.path.basename(seca_geojson)}")
+        gdf = gpd.read_file(seca_geojson)
+        shapes = ((geom, 1) for geom in gdf.geometry)
+        
+        seca_mask = rasterize(
+            shapes=shapes,
+            out_shape=self.shape,
+            transform=self.transform,
+            fill=0,
+            all_touched=True,
+            dtype=np.uint8
+        )
+        self._write_raster(seca_mask, out_seca_tif, dtype='uint8', nodata=0)
+
+    def process_chokepoints(self, cp_geojson: str, out_cp_tif: str):
+        """Создает растр узких мест (значение = id из свойств). uint16."""
+        if not self.shape or not self.transform:
+            raise ValueError("Сначала проинициализируйте meta")
+            
+        print(f"⚓ Генерация растра узких мест из: {os.path.basename(cp_geojson)}")
+        gdf = gpd.read_file(cp_geojson)
+        
+        # Предполагаем, что в GeoJSON есть свойство 'id'
+        shapes = ((geom, int(row.get('id', 1))) for geom, row in zip(gdf.geometry, gdf.properties))
+        
+        cp_mask = rasterize(
+            shapes=shapes,
+            out_shape=self.shape,
+            transform=self.transform,
+            fill=0,
+            all_touched=True,
+            dtype=np.uint16
+        )
+        self._write_raster(cp_mask, out_cp_tif, dtype='uint16', nodata=0)
+
+    def process_gebco(self, gebco_dir: str, out_depth_tif: str):
+        """Ресэмплинг тайлов GEBCO под сетку проекта. Сохраняем как int16."""
+        if not self.shape or not self.transform:
+            raise ValueError("Сначала проинициализируйте meta, считав базовый растр")
+
+        gebco_tiles = glob.glob(os.path.join(gebco_dir, "gebco_*.tif"))
+        if not gebco_tiles:
+            raise FileNotFoundError(f"Тайлы GEBCO не найдены в директории: {gebco_dir}")
+
+        print(f"🌊 Обработка батиметрии GEBCO (Найдено {len(gebco_tiles)} тайлов)")
+        
+        # Инициализируем массив значением NoData
+        dest_arr = np.full(self.shape, -32768, dtype=np.int16)
+        
+        for tile_path in gebco_tiles:
+            print(f"   -> Ресэмплинг тайла: {os.path.basename(tile_path)} ...")
+            with rasterio.open(tile_path) as src:
+                # Временный массив для текущего тайла
+                temp_arr = np.full(self.shape, -32768, dtype=np.int16)
+                
+                reproject(
+                    source=rasterio.band(src, 1),
+                    destination=temp_arr,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=self.transform,
+                    dst_crs=self.meta['crs'],
+                    resampling=Resampling.bilinear,
+                    src_nodata=src.nodata,
+                    dst_nodata=-32768
+                )
+                
+                # Накладываем обработанный тайл поверх общего массива
+                valid_mask = temp_arr != -32768
+                dest_arr[valid_mask] = temp_arr[valid_mask]
+                
+                # Очищаем память (~7 ГБ RAM на итерацию)
+                del temp_arr
+                del valid_mask
+                gc.collect()
+                
+        self._write_raster(dest_arr, out_depth_tif, dtype='int16', nodata=-32768)
 
     def _create_land_mask_from_geojson(self, geojson_path: str) -> np.ndarray:
         """Создает маску суши (1 - суша, 0 - вода) из GeoJSON полигонов океанов."""
@@ -154,14 +240,15 @@ class RasterPreprocessor:
         del land_mask
         gc.collect()
 
-        print("🎯 Препроцессинг успешно завершен!")
+        print("🎯 Базовый препроцессинг успешно завершен!")
 
 if __name__ == "__main__":
     BASE_DIR = "./data"
     
     preprocessor = RasterPreprocessor(BASE_DIR)
     
-    # Теперь мы передаем наш oceans-seas.geo.json
+    # 1. Основной препроцессинг (AИС)
+    # (Вызовет _read_raster и проинициализирует preprocessor.meta)
     preprocessor.process(
         count_tif=f"{BASE_DIR}/count.tif",
         vel_tif=f"{BASE_DIR}/mean_velocity_knots.tif",
@@ -170,3 +257,21 @@ if __name__ == "__main__":
         out_sd=f"{BASE_DIR}/processed/effective_sd_knots.tif",
         oceans_geojson=f"./app/static/oceans-seas.geo.json"
     )
+    
+    # 2. Подготовка SECA (Раскомментируйте, когда получите json)
+    # preprocessor.process_seca_mask(
+    #     seca_geojson=f"{BASE_DIR}/raw/seca_zones.geo.json",
+    #     out_seca_tif=f"{BASE_DIR}/processed/seca_mask.tif"
+    # )
+    
+    # 3. Подготовка батиметрии из нескольких тайлов GEBCO
+    # preprocessor.process_gebco(
+    #     gebco_dir=f"{BASE_DIR}/gebco",
+    #     out_depth_tif=f"{BASE_DIR}/processed/depth_meters.tif"
+    # )
+    
+    # 4. Подготовка узких мест
+    # preprocessor.process_chokepoints(
+    #     cp_geojson=f"{BASE_DIR}/raw/chokepoints.geo.json",
+    #     out_cp_tif=f"{BASE_DIR}/processed/chokepoints.tif"
+    # )

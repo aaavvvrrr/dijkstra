@@ -1,0 +1,13 @@
+{
+  "1": {
+    "name": "Panama Canal",
+    "max_length": 366.0,
+    "max_width": 51.25,
+    "max_draft": 15.2
+  },
+  "2": {
+    "name": "Suez Canal",
+    "max_width": 77.5,
+    "max_draft": 20.1
+  }
+}

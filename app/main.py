@@ -20,11 +20,8 @@ app = FastAPI(title="Maritime Routing API")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "processed"))
 
-eff_vel_path = os.path.join(DATA_DIR, "effective_velocity_knots.tif")
-eff_sd_path = os.path.join(DATA_DIR, "effective_sd_knots.tif")
-
 try:
-    router_instance = SphericalRasterRouter(eff_vel_path, eff_sd_path)
+    router_instance = SphericalRasterRouter(data_dir=DATA_DIR)
 except Exception as e:
     print(f"ОШИБКА: {e}")
     router_instance = None
@@ -34,6 +31,15 @@ class RouteRequest(BaseModel):
     start_lat: float = Field(...)
     end_lon: float = Field(...)
     end_lat: float = Field(...)
+
+    vessel_type: Optional[str] = Field(default="all", description="Тип судна")
+    draft: Optional[float] = Field(default=None, description="Осадка в метрах")
+    vessel_length: Optional[float] = Field(default=None, description="Длина судна в метрах")
+    vessel_width: Optional[float] = Field(default=None, description="Ширина судна в метрах")
+    forbidden_chokepoints: Optional[list[int]] = Field(default_factory=list, description="Список ID узких мест для запрета")
+    avoid_seca: bool = Field(default=False, description="Минимизировать движение по SECA")
+    calc_seca: bool = Field(default=False, description="Считать дистанцию по SECA")
+
     
 # =======================================================
 # API ОТЛАДКИ РАСТРА
@@ -102,7 +108,8 @@ async def websocket_route(websocket: WebSocket):
                     (msg["start_lon"], msg["start_lat"]),
                     (msg["end_lon"], msg["end_lat"]),
                     progress_callback=on_progress,
-                    check_cancel_callback=is_cancelled
+                    check_cancel_callback=is_cancelled,
+                    request_params=msg
                 )
                 if result:
                     await websocket.send_json({"type": "result", "geojson": result.to_geojson(request_params=msg)})
@@ -122,9 +129,9 @@ async def websocket_route(websocket: WebSocket):
 def get_tile(layer: str, z: int, x: int, y: int):
     # Выбираем правильный файл
     if layer == "speed":
-        filepath = eff_vel_path
+        filepath = os.path.join(DATA_DIR, "eff_vel_all.tif")
     elif layer == "sd":
-        filepath = eff_sd_path
+        filepath = os.path.join(DATA_DIR, "eff_sd_all.tif")
     elif layer == "debug":
         filepath = router_instance.debug_tif_path if router_instance else None
     else:

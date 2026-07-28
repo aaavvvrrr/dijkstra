@@ -58,7 +58,7 @@
             margin-bottom: 8px;
         }
 
-        input {
+        input[type="text"], input[type="number"], select {
             width: 100%;
             padding: 10px 12px;
             border: 1px solid var(--border);
@@ -68,6 +68,35 @@
             transition: border-color 0.2s;
         }
         input[readonly] { cursor: not-allowed; opacity: 0.8; }
+
+        /* Фикс для контролов Leaflet (чтобы слои помещались) */
+        .leaflet-control-layers-expanded {
+            padding: 10px !important;
+            min-width: 250px;
+        }
+        .leaflet-control-layers-overlays label,
+        .leaflet-control-layers-base label {
+            display: flex !important;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap; /* Запрет переноса строк */
+            margin-bottom: 6px;
+            font-size: 14px;
+        }
+        .leaflet-control-layers-selector {
+            margin: 0 !important;
+            top: auto !important;
+        }
+
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: normal !important;
+            cursor: pointer;
+            margin-bottom: 8px;
+            font-size: 0.875rem;
+        }
 
         .btn {
             width: 100%;
@@ -139,6 +168,32 @@
             <span class="instruction">Кликните на карту, чтобы задать</span>
         </div>
 
+        <div class="control-group">
+            <label>Параметры судна</label>
+             <select id="vessel-type" style="margin-bottom: 8px;">
+                <option value="all">Все типы (По умолчанию)</option>
+                <option value="tanker">Танкер (tanker)</option>
+                <option value="cargo">Грузовое (cargo)</option>
+                <option value="fishing">Рыболовное (fishing)</option>
+                <option value="passenger">Пассажирское (passenger)</option>
+            </select>
+            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                <input type="number" id="vessel-length" placeholder="Длина (м)" min="0">
+                <input type="number" id="vessel-width" placeholder="Ширина (м)" min="0">
+            </div>
+            <input type="number" id="vessel-draft" placeholder="Осадка (м) — опционально" step="0.1" min="0">
+        </div>
+
+        <div class="control-group">
+            <label>Дополнительные опции</label>
+            <label class="checkbox-label">
+                <input type="checkbox" id="avoid-seca"> Минимизировать проход по зонах SECA
+            </label>
+            <label class="checkbox-label">
+                <input type="checkbox" id="calc-seca"> Рассчитать расстояние в зонах SECA
+            </label>
+        </div>
+
         <div style="display: flex; gap: 8px;">
             <button class="btn" id="calc-btn" disabled>Построить маршрут</button>
             <button class="btn" id="cancel-btn" style="background: var(--error); display: none;">Прервать</button>
@@ -154,6 +209,10 @@
             <div class="stat-row">
                 <span>Средняя скорость:</span>
                 <span class="stat-value" id="res-speed">0 км/ч</span>
+            </div>
+            <div class="stat-row" id="res-seca-row" style="display: none; color: #d97706;">
+                <span>Дистанция по SECA:</span>
+                <span class="stat-value" id="res-seca-dist">0 км</span>
             </div>
 
             <h3 style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px;">Прогноз времени (Монте-Карло)</h3>
@@ -329,11 +388,20 @@
                 document.getElementById('res-time-pess').innerText = '-';
                 resultsPanel.classList.add('active');
 
-                // Отправляем старт
+                 // Отправляем старт
+                const draftVal = document.getElementById('vessel-draft').value;
                 ws.send(JSON.stringify({
                     action: "start",
-                    start_lon: coords.start.lon, start_lat: coords.start.lat,
-                    end_lon: coords.end.lon, end_lat: coords.end.lat
+                    start_lon: coords.start.lon, 
+                    start_lat: coords.start.lat,
+                    end_lon: coords.end.lon, 
+                    end_lat: coords.end.lat,
+                    vessel_type: document.getElementById('vessel-type').value,
+                    draft: draftVal ? parseFloat(draftVal) : null,
+                    vessel_length: document.getElementById('vessel-length').value ? parseFloat(document.getElementById('vessel-length').value) : null,
+                    vessel_width: document.getElementById('vessel-width').value ? parseFloat(document.getElementById('vessel-width').value) : null,
+                    avoid_seca: document.getElementById('avoid-seca').checked,
+                    calc_seca: document.getElementById('calc-seca').checked
                 }));
             };
 
@@ -369,6 +437,14 @@
                     document.getElementById('res-time-opt').innerText = props.time_optimistic_hours + ' ч';
                     document.getElementById('res-time-mean').innerText = props.time_total_hours + ' ч';
                     document.getElementById('res-time-pess').innerText = props.time_pessimistic_hours + ' ч';
+
+                    const secaRow = document.getElementById('res-seca-row');
+                    if (props.seca_distance_km !== undefined) {
+                        document.getElementById('res-seca-dist').innerText = props.seca_distance_km + ' км';
+                        secaRow.style.display = 'flex';
+                    } else {
+                        secaRow.style.display = 'none';
+                    }
 
                     if (props.actual_start_lonlat) {
                         markers.start.setLatLng([props.actual_start_lonlat[1], props.actual_start_lonlat[0]]);
