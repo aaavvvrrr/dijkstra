@@ -8,6 +8,7 @@ from typing import Optional
 import os
 import glob
 import gc
+import json
 
 class RasterPreprocessor:
     """
@@ -21,6 +22,35 @@ class RasterPreprocessor:
         self.meta = None
         self.transform = None
         self.shape = None
+
+    def init_from_raster(self, filepath: str):
+        """Быстрая инициализация метаданных (без загрузки всего массива в RAM)."""
+        print(f"🔧 Инициализация сетки из: {os.path.basename(filepath)}")
+        with rasterio.open(filepath) as src:
+            self.meta = src.meta.copy()
+            self.transform = src.transform
+            self.shape = (src.height, src.width)
+
+    def _read_and_fix_geojson(self, filepath: str) -> gpd.GeoDataFrame:
+        """Считывает GeoJSON и принудительно замыкает все полигоны (защита от ошибки LinearRing)."""
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            
+        for feat in data.get('features', []):
+            geom = feat.get('geometry')
+            if not geom: continue
+            
+            if geom['type'] == 'Polygon':
+                for ring in geom['coordinates']:
+                    if ring and ring[0] != ring[-1]:
+                        ring.append(ring[0])
+            elif geom['type'] == 'MultiPolygon':
+                for poly in geom['coordinates']:
+                    for ring in poly:
+                        if ring and ring[0] != ring[-1]:
+                            ring.append(ring[0])
+                            
+        return gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4326")
 
     def _read_raster(self, filepath: str) -> np.ndarray:
         """Чтение растра в формате float32."""
@@ -57,10 +87,10 @@ class RasterPreprocessor:
     def process_seca_mask(self, seca_geojson: str, out_seca_tif: str):
         """Создает растр маски SECA (1 - SECA, 0 - остальное). uint8 для экономии RAM."""
         if not self.shape or not self.transform:
-            raise ValueError("Сначала проинициализируйте meta, считав базовый растр (через _read_raster)")
+            raise ValueError("Сначала проинициализируйте meta")
             
         print(f"🗺️ Генерация маски SECA из: {os.path.basename(seca_geojson)}")
-        gdf = gpd.read_file(seca_geojson)
+        gdf = self._read_and_fix_geojson(seca_geojson)
         shapes = ((geom, 1) for geom in gdf.geometry)
         
         seca_mask = rasterize(
@@ -79,7 +109,7 @@ class RasterPreprocessor:
             raise ValueError("Сначала проинициализируйте meta")
             
         print(f"⚓ Генерация растра узких мест из: {os.path.basename(cp_geojson)}")
-        gdf = gpd.read_file(cp_geojson)
+        gdf = self._read_and_fix_geojson(cp_geojson)
         
         # Предполагаем, что в GeoJSON есть свойство 'id'
         shapes = ((geom, int(row.get('id', 1))) for geom, row in zip(gdf.geometry, gdf.properties))
@@ -140,7 +170,7 @@ class RasterPreprocessor:
     def _create_land_mask_from_geojson(self, geojson_path: str) -> np.ndarray:
         """Создает маску суши (1 - суша, 0 - вода) из GeoJSON полигонов океанов."""
         print(f"🌊 Генерация маски суши из: {os.path.basename(geojson_path)}")
-        gdf = gpd.read_file(geojson_path)
+        gdf = self._read_and_fix_geojson(geojson_path)
         
         # Полигоны в файле - это ОКЕАНЫ (вода). 
         # Значит, мы заливаем весь растр единицами (суша), 
@@ -243,34 +273,60 @@ class RasterPreprocessor:
         print("🎯 Базовый препроцессинг успешно завершен!")
 
 if __name__ == "__main__":
-    BASE_DIR = "./data"
+    import json
+    import urllib.request
+    
+    CONFIG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "config.json"))
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        config = json.load(f)
+        
+    BASE_DIR = config["paths"]["data_dir"]
+    
+    # Загрузка данных о волнении (Wave Data) по конфигурации
+    wave_config = config["waves"]
+    wave_url = wave_config["source_url"].replace("{date}", wave_config["target_date"].replace("-", ""))
+    wave_out = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", wave_config["output_file"]))
+    
+    print(f"🌊 Подготовка данных волнения за {wave_config['target_date']}...")
+    print(f"📥 Источник: {wave_url}")
+    # Раскомментируйте код ниже, чтобы скрипт реально скачивал файл:
+    # os.makedirs(os.path.dirname(wave_out), exist_ok=True)
+    # urllib.request.urlretrieve(wave_url, wave_out)
+    # print(f"✅ Файл волнения сохранен в {wave_out}")
     
     preprocessor = RasterPreprocessor(BASE_DIR)
     
+    # ---------------------------------------------------------
+    # ШАГ 0: Если у вас УЖЕ ЕСТЬ готовый базовый растр (например count.tif), 
+    # мы просто мгновенно считаем его размерность для остальных шагов!
+    # Раскомментируйте строку ниже, если НЕ хотите ждать Шаг 1:
+    preprocessor.init_from_raster(f"{BASE_DIR}/count.tif")
+    # ---------------------------------------------------------
+    
     # 1. Основной препроцессинг (AИС)
-    # (Вызовет _read_raster и проинициализирует preprocessor.meta)
-    preprocessor.process(
-        count_tif=f"{BASE_DIR}/count.tif",
-        vel_tif=f"{BASE_DIR}/mean_velocity_knots.tif",
-        sd_tif=f"{BASE_DIR}/mean_velocity_sd_knots.tif",
-        out_eff_vel=f"{BASE_DIR}/processed/effective_velocity_knots.tif",
-        out_sd=f"{BASE_DIR}/processed/effective_sd_knots.tif",
-        oceans_geojson=f"./app/static/oceans-seas.geo.json"
+    # Занимает много времени/памяти. Запускайте только если обновились исходники!
+    # preprocessor.process(
+    #     count_tif=f"{BASE_DIR}/count.tif",
+    #     vel_tif=f"{BASE_DIR}/mean_velocity_knots.tif",
+    #     sd_tif=f"{BASE_DIR}/mean_velocity_sd_knots.tif",
+    #     out_eff_vel=f"{BASE_DIR}/processed/eff_vel_all.tif",
+    #     out_sd=f"{BASE_DIR}/processed/eff_sd_all.tif",
+    #     oceans_geojson=f"./app/static/oceans-seas.geo.json"
+    # )
+    
+    # 2. Подготовка SECA
+    preprocessor.process_seca_mask(
+        seca_geojson=f"{BASE_DIR}/raw/seca_zones.geo.json",
+        out_seca_tif=f"{BASE_DIR}/processed/seca_mask.tif"
     )
     
-    # 2. Подготовка SECA (Раскомментируйте, когда получите json)
-    # preprocessor.process_seca_mask(
-    #     seca_geojson=f"{BASE_DIR}/raw/seca_zones.geo.json",
-    #     out_seca_tif=f"{BASE_DIR}/processed/seca_mask.tif"
-    # )
-    
     # 3. Подготовка батиметрии из нескольких тайлов GEBCO
-    # preprocessor.process_gebco(
-    #     gebco_dir=f"{BASE_DIR}/gebco",
-    #     out_depth_tif=f"{BASE_DIR}/processed/depth_meters.tif"
-    # )
+    preprocessor.process_gebco(
+        gebco_dir=f"{BASE_DIR}/gebco",
+        out_depth_tif=f"{BASE_DIR}/processed/depth_meters.tif"
+    )
     
-    # 4. Подготовка узких мест
+    # 4. Подготовка узких мест (Раскомментируйте, когда будет файл)
     # preprocessor.process_chokepoints(
     #     cp_geojson=f"{BASE_DIR}/raw/chokepoints.geo.json",
     #     out_cp_tif=f"{BASE_DIR}/processed/chokepoints.tif"

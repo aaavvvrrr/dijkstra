@@ -13,17 +13,27 @@ from PIL import Image
 import numpy as np
 
 from rio_tiler.io import Reader
+from rio_tiler.colormap import cmap
 from core import SphericalRasterRouter
 
 app = FastAPI(title="Maritime Routing API")
 
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "processed"))
+import json
+
+# Ищем конфиг в корне проекта или по пути из ENV
+CONFIG_PATH = os.getenv("APP_CONFIG_PATH", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.json")))
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    APP_CONFIG = json.load(f)
+
+STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", APP_CONFIG["paths"]["static_dir"]))
+DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", APP_CONFIG["paths"]["processed_dir"]))
 
 try:
     router_instance = SphericalRasterRouter(data_dir=DATA_DIR)
 except Exception as e:
-    print(f"ОШИБКА: {e}")
+    import traceback
+    print("❌ КРИТИЧЕСКАЯ ОШИБКА ИНИЦИАЛИЗАЦИИ БЭКЕНДА:")
+    traceback.print_exc()
     router_instance = None
 
 class RouteRequest(BaseModel):
@@ -124,7 +134,6 @@ async def websocket_route(websocket: WebSocket):
     except WebSocketDisconnect: pass
 
 # Замените эндпоинт get_tile на этот код:
-
 @app.get("/tiles/{layer}/{z}/{x}/{y}.png")
 def get_tile(layer: str, z: int, x: int, y: int):
     # Выбираем правильный файл
@@ -132,6 +141,14 @@ def get_tile(layer: str, z: int, x: int, y: int):
         filepath = os.path.join(DATA_DIR, "eff_vel_all.tif")
     elif layer == "sd":
         filepath = os.path.join(DATA_DIR, "eff_sd_all.tif")
+    elif layer == "seca":
+        filepath = os.path.join(DATA_DIR, "seca_mask.tif")
+    elif layer == "depth":
+        filepath = os.path.join(DATA_DIR, "depth_meters.tif")
+    elif layer == "waves":
+        # Берем путь к волнению прямо из конфига
+        wave_path = APP_CONFIG["waves"]["output_file"]
+        filepath = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", wave_path))
     elif layer == "debug":
         filepath = router_instance.debug_tif_path if router_instance else None
     else:
@@ -142,25 +159,45 @@ def get_tile(layer: str, z: int, x: int, y: int):
 
     try:
         with Reader(filepath) as src:
-            # Магия здесь: nodata=0 автоматически маскирует нули (сушу) в прозрачность!
-            img = src.tile(x, y, z, nodata=0)
+            # Для глубины используем нативный nodata (-32768), для остальных - 0 (суша/нет данных)
+            if layer == "depth":
+                img = src.tile(x, y, z)
+            else:
+                img = src.tile(x, y, z, nodata=0)
             
             if layer == "debug":
                 # Кастомная раскраска: Мировой океан - синий, изолированные озера - красные
-                cmap = {0: (0, 0, 0, 0)} # Суша прозрачная
+                _cmap = {0: (0, 0, 0, 0)} # Суша прозрачная
                 for i in range(1, router_instance.num_features + 2):
                     if i == router_instance.main_ocean_id:
-                        cmap[i] = (59, 130, 246, 180) # Синий
+                        _cmap[i] = (59, 130, 246, 180) # Синий
                     else:
-                        cmap[i] = (239, 68, 68, 200)  # Красный
-                png_bytes = img.render(img_format="PNG", colormap=cmap)
+                        _cmap[i] = (239, 68, 68, 200)  # Красный
+                png_bytes = img.render(img_format="PNG", colormap=_cmap)
+                
+            elif layer == "seca":
+                # Только зоны SECA (значение 1) - оранжевый полупрозрачный
+                _cmap = {1: (249, 115, 22, 150)}
+                png_bytes = img.render(img_format="PNG", colormap=_cmap)
+                
+            elif layer == "depth":
+                # Батиметрия: rescale от -1000 до 0. blues_r делает глубину темной
+                img.rescale(in_range=((-5000, 0),))
+                png_bytes = img.render(img_format="PNG", colormap=cmap.get("blues_r"))
+                
+            elif layer == "waves":
+                # Волны (высота): от 0 до 10 метров. Палитра viridis (от синего к желтому)
+                img.rescale(in_range=((0, 10),))
+                png_bytes = img.render(img_format="PNG", colormap=cmap.get("viridis"))
                 
             elif layer == "speed":
                 # turbo - от синего (медленно) к красному (быстро)
-                png_bytes = img.render(img_format="PNG", colormap_name="turbo", rescale=((5, 30),))
+                img.rescale(in_range=((0, 20),))
+                png_bytes = img.render(img_format="PNG", colormap=cmap.get("turbo"))
             else:
                 # plasma - от темно-фиолетового к желтому (высокая дисперсия)
-                png_bytes = img.render(img_format="PNG", colormap_name="plasma", rescale=((0, 5),))
+                img.rescale(in_range=((0, 5),))
+                png_bytes = img.render(img_format="PNG", colormap=cmap.get("plasma"))
                 
             return Response(content=png_bytes, media_type="image/png")
             

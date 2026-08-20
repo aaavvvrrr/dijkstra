@@ -1,0 +1,15 @@
+services:
+  maritime-router:
+    build: .
+    container_name: dijkstra_routing_engine
+    ports:
+      - "8000:8000"
+    volumes:
+      # Прокидываем папку с тяжелыми растрами внутрь контейнера,
+      # чтобы не билдить 10-гигабайтные матрицы в Docker-образ
+      - ./data:/app_root/data
+      # Прокидываем конфиг для быстрого изменения дат без пересборки контейнера
+      - ./config.json:/app_root/config.json
+    environment:
+      - APP_CONFIG_PATH=/app_root/config.json
+    restart: unless-stopped

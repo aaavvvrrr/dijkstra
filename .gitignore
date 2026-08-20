@@ -1,2 +1,3 @@
 data
 app/__pycache__/*
+make_prompt/prompt.md

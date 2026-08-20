@@ -247,11 +247,17 @@
         // Подключаем наши динамические растры из FastAPI Tile Server
         const effSpeedLayer = L.tileLayer('/tiles/speed/{z}/{x}/{y}.png', { opacity: 0.8, maxZoom: 10 });
         const effSdLayer = L.tileLayer('/tiles/sd/{z}/{x}/{y}.png', { opacity: 0.8, maxZoom: 10 });
+        const depthLayer = L.tileLayer('/tiles/depth/{z}/{x}/{y}.png', { opacity: 0.8, maxZoom: 10 });
+        const wavesLayer = L.tileLayer('/tiles/waves/{z}/{x}/{y}.png', { opacity: 0.7, maxZoom: 10 });
+        const secaLayer = L.tileLayer('/tiles/seca/{z}/{x}/{y}.png', { opacity: 0.8, maxZoom: 10 });
         const debugGridLayer = L.tileLayer('/tiles/debug/{z}/{x}/{y}.png', { opacity: 0.7, maxZoom: 10 });
 
         const overlayMaps = {
             "Детализация: Скорость": effSpeedLayer,
             "Детализация: Дисперсия": effSdLayer,
+            "Батиметрия (Глубины)": depthLayer,
+            "Волнение (Погода)": wavesLayer,
+            "Зоны SECA": secaLayer,
             "Связность морей (Грубая)": debugGridLayer
         };
         L.control.layers({"Базовая карта": baseMap}, overlayMaps, {collapsed: false}).addTo(map);

@@ -1,0 +1,16 @@
+{
+  "paths": {
+    "data_dir": "./data",
+    "processed_dir": "./data/processed",
+    "raw_dir": "./data/raw",
+    "static_dir": "./app/static"
+  },
+  "waves": {
+    "source_url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/wave/prod/global/{date}/wave.grib2",
+    "target_date": "2026-08-20",
+    "output_file": "./data/raw/waves_current.tif"
+  },
+  "routing": {
+    "default_max_speed": 30.0
+  }
+}
