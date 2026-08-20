@@ -6,9 +6,9 @@
     "static_dir": "./app/static"
   },
   "waves": {
-    "source_url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/wave/prod/global/{date}/wave.grib2",
+    "source_url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.{date}/00/wave/gridded/gfswave.t00z.global.0p16.f000.grib2",
     "target_date": "2026-08-20",
-    "output_file": "./data/raw/waves_current.tif"
+    "output_file": "./data/raw/waves_current.grib2"
   },
   "routing": {
     "default_max_speed": 30.0

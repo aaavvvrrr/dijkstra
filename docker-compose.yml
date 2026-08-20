@@ -10,6 +10,8 @@ services:
       - ./data:/app_root/data
       # Прокидываем конфиг для быстрого изменения дат без пересборки контейнера
       - ./config.json:/app_root/config.json
+      # Прокидываем сам код для Hot-Reloading без пересборки Docker!
+      - ./app:/app_root/app
     environment:
       - APP_CONFIG_PATH=/app_root/config.json
     restart: unless-stopped

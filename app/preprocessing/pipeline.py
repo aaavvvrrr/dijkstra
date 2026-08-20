@@ -187,6 +187,40 @@ class RasterPreprocessor:
         )
         return land_mask
 
+    def download_waves(self, source_url: str, target_date: str, out_filepath: str):
+        """
+        Скачивает и подготавливает данные о волнении (погоде).
+        В отличие от статичных растров, этот метод предназначен для регулярного запуска.
+        """
+        import urllib.request
+        from urllib.error import URLError
+        
+        # NOAA обычно требует дату в формате YYYYMMDD
+        formatted_date = target_date.replace("-", "")
+        url = source_url.replace("{date}", formatted_date)
+        
+        print(f"🌊 Обновление динамических данных: Волнение за {target_date}...")
+        print(f"   -> Источник: {url}")
+        
+        os.makedirs(os.path.dirname(out_filepath), exist_ok=True)
+        
+        # Притворяемся обычным браузером, чтобы обойти защиту 403 Forbidden от NOAA
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        }
+        
+        req = urllib.request.Request(url, headers=headers)
+        
+        try:
+            with urllib.request.urlopen(req) as response:
+                with open(out_filepath, 'wb') as out_file:
+                    out_file.write(response.read())
+            print(f"✅ Файл волнения успешно сохранен: {out_filepath}")
+        except URLError as e:
+            print(f"❌ Ошибка скачивания волнения: {e}")
+            print("   Проверьте доступность интернета или корректность ссылки NOAA в config.json.")
+
     def process(
         self, count_tif: str, vel_tif: str, sd_tif: str, 
         out_eff_vel: str, out_sd: str, oceans_geojson: Optional[str] = None
@@ -274,60 +308,88 @@ class RasterPreprocessor:
 
 if __name__ == "__main__":
     import json
-    import urllib.request
     
+    # 1. Читаем глобальную конфигурацию
     CONFIG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "config.json"))
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = json.load(f)
         
     BASE_DIR = config["paths"]["data_dir"]
-    
-    # Загрузка данных о волнении (Wave Data) по конфигурации
-    wave_config = config["waves"]
-    wave_url = wave_config["source_url"].replace("{date}", wave_config["target_date"].replace("-", ""))
-    wave_out = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", wave_config["output_file"]))
-    
-    print(f"🌊 Подготовка данных волнения за {wave_config['target_date']}...")
-    print(f"📥 Источник: {wave_url}")
-    # Раскомментируйте код ниже, чтобы скрипт реально скачивал файл:
-    # os.makedirs(os.path.dirname(wave_out), exist_ok=True)
-    # urllib.request.urlretrieve(wave_url, wave_out)
-    # print(f"✅ Файл волнения сохранен в {wave_out}")
-    
     preprocessor = RasterPreprocessor(BASE_DIR)
     
-    # ---------------------------------------------------------
-    # ШАГ 0: Если у вас УЖЕ ЕСТЬ готовый базовый растр (например count.tif), 
-    # мы просто мгновенно считаем его размерность для остальных шагов!
-    # Раскомментируйте строку ниже, если НЕ хотите ждать Шаг 1:
-    preprocessor.init_from_raster(f"{BASE_DIR}/count.tif")
-    # ---------------------------------------------------------
+    # =====================================================================
+    # УПРАВЛЕНИЕ ПАЙПЛАЙНОМ (Toggles)
+    # Включайте (True) или выключайте (False) нужные шаги в зависимости от задачи.
+    # =====================================================================
+    RUN_STEPS = {
+        # Базовая инициализация матрицы (Нужна почти всегда, кроме генерации волн)
+        "init_grid": True,
+        
+        # [СТАТИКА] Тяжелый просчет матриц скоростей АИС (Запускать 1 раз)
+        "ais_data": False,
+        
+        # [СТАТИКА] Растеризация экологических зон SECA (Запускать 1 раз)
+        "seca_zones": False,
+        
+        # [СТАТИКА] Склейка тайлов глубин GEBCO (Запускать 1 раз)
+        "gebco_bathymetry": False,
+        
+        # [СТАТИКА] Растеризация узких мест Суэц/Панама (Запускать 1 раз)
+        "chokepoints": False,
+        
+        # [ДИНАМИКА] Скачивание погоды/волнения (Запускать регулярно по CRON)
+        "waves_weather": True 
+    }
+
+    print("\n=== СТАРТ ПАЙПЛАЙНА ПРЕДОБРАБОТКИ ===")
     
-    # 1. Основной препроцессинг (AИС)
-    # Занимает много времени/памяти. Запускайте только если обновились исходники!
-    # preprocessor.process(
-    #     count_tif=f"{BASE_DIR}/count.tif",
-    #     vel_tif=f"{BASE_DIR}/mean_velocity_knots.tif",
-    #     sd_tif=f"{BASE_DIR}/mean_velocity_sd_knots.tif",
-    #     out_eff_vel=f"{BASE_DIR}/processed/eff_vel_all.tif",
-    #     out_sd=f"{BASE_DIR}/processed/eff_sd_all.tif",
-    #     oceans_geojson=f"./app/static/oceans-seas.geo.json"
-    # )
-    
-    # 2. Подготовка SECA
-    preprocessor.process_seca_mask(
-        seca_geojson=f"{BASE_DIR}/raw/seca_zones.geo.json",
-        out_seca_tif=f"{BASE_DIR}/processed/seca_mask.tif"
-    )
-    
-    # 3. Подготовка батиметрии из нескольких тайлов GEBCO
-    preprocessor.process_gebco(
-        gebco_dir=f"{BASE_DIR}/gebco",
-        out_depth_tif=f"{BASE_DIR}/processed/depth_meters.tif"
-    )
-    
-    # 4. Подготовка узких мест (Раскомментируйте, когда будет файл)
-    # preprocessor.process_chokepoints(
-    #     cp_geojson=f"{BASE_DIR}/raw/chokepoints.geo.json",
-    #     out_cp_tif=f"{BASE_DIR}/processed/chokepoints.tif"
-    # )
+    if RUN_STEPS["init_grid"]:
+        count_file = f"{BASE_DIR}/count.tif"
+        if os.path.exists(count_file):
+            preprocessor.init_from_raster(count_file)
+        else:
+            print("⚠️ Файл базовой сетки не найден. Инициализация пропущена.")
+
+    if RUN_STEPS["ais_data"]:
+        static_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", config["paths"]["static_dir"]))
+        preprocessor.process(
+            count_tif=f"{BASE_DIR}/count.tif",
+            vel_tif=f"{BASE_DIR}/mean_velocity_knots.tif",
+            sd_tif=f"{BASE_DIR}/mean_velocity_sd_knots.tif",
+            out_eff_vel=f"{config['paths']['processed_dir']}/eff_vel_all.tif",
+            out_sd=f"{config['paths']['processed_dir']}/eff_sd_all.tif",
+            oceans_geojson=f"{static_dir}/oceans-seas.geo.json"
+        )
+
+    if RUN_STEPS["seca_zones"]:
+        preprocessor.process_seca_mask(
+            seca_geojson=f"{config['paths']['raw_dir']}/seca_zones.geo.json",
+            out_seca_tif=f"{config['paths']['processed_dir']}/seca_mask.tif"
+        )
+
+    if RUN_STEPS["gebco_bathymetry"]:
+        preprocessor.process_gebco(
+            gebco_dir=f"{BASE_DIR}/gebco",
+            out_depth_tif=f"{config['paths']['processed_dir']}/depth_meters.tif"
+        )
+
+    if RUN_STEPS["chokepoints"]:
+        cp_file = f"{config['paths']['raw_dir']}/chokepoints.geo.json"
+        if os.path.exists(cp_file):
+            preprocessor.process_chokepoints(
+                cp_geojson=cp_file,
+                out_cp_tif=f"{config['paths']['processed_dir']}/chokepoints.tif"
+            )
+        else:
+            print(f"⏭️ Пропуск chokepoints: файл {cp_file} не найден.")
+
+    if RUN_STEPS["waves_weather"]:
+        w_conf = config["waves"]
+        wave_out = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", w_conf["output_file"]))
+        preprocessor.download_waves(
+            source_url=w_conf["source_url"],
+            target_date=w_conf["target_date"],
+            out_filepath=wave_out
+        )
+
+    print("=== ПАЙПЛАЙН ЗАВЕРШЕН ===\n")

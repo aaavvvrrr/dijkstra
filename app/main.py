@@ -159,11 +159,12 @@ def get_tile(layer: str, z: int, x: int, y: int):
 
     try:
         with Reader(filepath) as src:
+            # rio-tiler требует параметр indexes=1 для выбора первого слоя (канала).
             # Для глубины используем нативный nodata (-32768), для остальных - 0 (суша/нет данных)
             if layer == "depth":
-                img = src.tile(x, y, z)
+                img = src.tile(x, y, z, indexes=1)
             else:
-                img = src.tile(x, y, z, nodata=0)
+                img = src.tile(x, y, z, indexes=1, nodata=0)
             
             if layer == "debug":
                 # Кастомная раскраска: Мировой океан - синий, изолированные озера - красные
@@ -202,8 +203,12 @@ def get_tile(layer: str, z: int, x: int, y: int):
             return Response(content=png_bytes, media_type="image/png")
             
     except Exception as e:
+        # TileOutsideBounds - нормальная ситуация, когда Leaflet запрашивает пустоту за границами растра
+        if type(e).__name__ == "TileOutsideBounds":
+            return Response(status_code=204)
+            
         import traceback
-        print(f"❌ ОШИБКА РЕНДЕРА ТАЙЛА '{layer}' (z={z}, x={x}, y={y}):")
+        print(f"❌ ОШИБКА РЕНДЕРА ТАЙЛА '{layer}' (z={z}, x={x}, y={y}): {e}")
         traceback.print_exc()
         return Response(status_code=204)    
 
