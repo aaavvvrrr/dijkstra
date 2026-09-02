@@ -37,10 +37,13 @@ except Exception as e:
     router_instance = None
 
 class RouteRequest(BaseModel):
-    start_lon: float = Field(...)
-    start_lat: float = Field(...)
-    end_lon: float = Field(...)
-    end_lat: float = Field(...)
+    start_lon: Optional[float] = Field(default=None, description="Долгота старта")
+    start_lat: Optional[float] = Field(default=None, description="Широта старта")
+    start_unlocode: Optional[str] = Field(default=None, description="UN/LOCODE старта")
+    
+    end_lon: Optional[float] = Field(default=None, description="Долгота финиша")
+    end_lat: Optional[float] = Field(default=None, description="Широта финиша")
+    end_unlocode: Optional[str] = Field(default=None, description="UN/LOCODE финиша")
 
     vessel_type: Optional[str] = Field(default="all", description="Тип судна")
     draft: Optional[float] = Field(default=None, description="Осадка в метрах")
@@ -50,7 +53,63 @@ class RouteRequest(BaseModel):
     avoid_seca: bool = Field(default=False, description="Минимизировать движение по SECA")
     calc_seca: bool = Field(default=False, description="Считать дистанцию по SECA")
 
+
+import csv
+
+UNLOCODE_DB = {}
+_locodes_path = os.path.join(os.path.dirname(__file__), "locodes.csv")
+
+if os.path.exists(_locodes_path):
+    with open(_locodes_path, "r", encoding="utf-8") as f:
+        for row in csv.reader(f):
+            if len(row) >= 7:
+                try:
+                    # Долгота - последний элемент, Широта - предпоследний
+                    UNLOCODE_DB[row[0].strip().upper()] = (float(row[-1]), float(row[-2]))
+                except ValueError:
+                    pass
+
+# Фоллбэк: Порт VADINAR (Индия) часто ищут по прямому названию, а не по коду INVAD
+if "INVAD" in UNLOCODE_DB and "VADINAR" not in UNLOCODE_DB:
+    UNLOCODE_DB["VADINAR"] = UNLOCODE_DB["INVAD"]
+elif "VADINAR" not in UNLOCODE_DB:
+    UNLOCODE_DB["VADINAR"] = (69.6752, 22.456428)
+
+def resolve_coords(lon: Optional[float], lat: Optional[float], unlocode: Optional[str]):
+    if lon is not None and lat is not None:
+        return lon, lat
+    if unlocode and unlocode.upper() in UNLOCODE_DB:
+        return UNLOCODE_DB[unlocode.upper()]
+    raise ValueError(f"Не удалось определить координаты для запроса (координаты не заданы, либо UN/LOCODE '{unlocode}' не найден).")
+
+# =======================================================
+# REST API 
+# =======================================================
+@app.post("/api/route")
+async def calculate_route_api(req: RouteRequest):
+    if not router_instance:
+        raise HTTPException(status_code=500, detail="Бэкенд не инициализирован")
     
+    try:
+        start_lon, start_lat = resolve_coords(req.start_lon, req.start_lat, req.start_unlocode)
+        end_lon, end_lat = resolve_coords(req.end_lon, req.end_lat, req.end_unlocode)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+        
+    try:
+        result = await router_instance.find_route(
+            (start_lon, start_lat),
+            (end_lon, end_lat),
+            request_params=req.model_dump()
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail="Маршрут не найден")
+        return result.to_geojson(request_params=req.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {str(e)}")
+
 # =======================================================
 # API ОТЛАДКИ РАСТРА
 # =======================================================
@@ -114,9 +173,12 @@ async def websocket_route(websocket: WebSocket):
         if msg.get("action") == "start":
             listener_task = asyncio.create_task(listen_for_cancel())
             try:
+                slon, slat = resolve_coords(msg.get("start_lon"), msg.get("start_lat"), msg.get("start_unlocode"))
+                elon, elat = resolve_coords(msg.get("end_lon"), msg.get("end_lat"), msg.get("end_unlocode"))
+                
                 result = await router_instance.find_route(
-                    (msg["start_lon"], msg["start_lat"]),
-                    (msg["end_lon"], msg["end_lat"]),
+                    (slon, slat),
+                    (elon, elat),
                     progress_callback=on_progress,
                     check_cancel_callback=is_cancelled,
                     request_params=msg

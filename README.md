@@ -139,7 +139,7 @@ python main.py
 ### Расчет маршрута (Real-time WebSocket)
 `WS /api/ws/route`
 
-Отправка координат для старта потокового поиска:
+Отправка координат для старта потокового поиска (поддерживаются как точные координаты, так и `start_unlocode` / `end_unlocode`):
 ```json
 {
   "action": "start",
@@ -153,12 +153,24 @@ python main.py
 `POST /api/route`
 
 **Request Body (JSON):**
+Координаты старта и финиша можно передавать как точными значениями широты и долготы, так и через международные коды портов UN/LOCODE.
+
+Пример по координатам:
 ```json
 {
   "start_lon": -5.35,
   "start_lat": 36.14,
   "end_lon": 14.51,
   "end_lat": 35.89
+}
+```
+
+Пример по UN/LOCODE:
+```json
+
+{
+  "start_unlocode": "RUPRI",
+  "end_unlocode": "CNHUH"
 }
 ```
 

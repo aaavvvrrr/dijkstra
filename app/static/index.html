@@ -140,6 +140,23 @@
 
         /* Helper instruction */
         .instruction { font-size: 0.8rem; color: var(--primary); margin-top: 4px; display: block; }
+
+        .script-panel {
+            margin-top: 1rem;
+            padding: 12px;
+            background: #1e293b;
+            color: #f8fafc;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 0.75rem;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            display: none;
+        }
+        .script-panel.active { display: block; }
+        .script-header {
+            display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-family: sans-serif;
+        }
     </style>
 </head>
 <body>
@@ -153,19 +170,21 @@
         <div class="control-group">
             <label>Точка А (Старт)</label>
             <div class="input-row">
-                <input type="text" id="start-lat" placeholder="Широта" readonly>
-                <input type="text" id="start-lon" placeholder="Долгота" readonly>
+                <input type="text" id="start-lat" placeholder="Широта" readonly style="flex: 1;">
+                <input type="text" id="start-lon" placeholder="Долгота" readonly style="flex: 1;">
+                <input type="text" id="start-unlocode" placeholder="UN/LOCODE" style="flex: 1.2;">
             </div>
-            <span class="instruction">Кликните на карту, чтобы задать</span>
+            <span class="instruction">Кликните на карту или введите UN/LOCODE</span>
         </div>
 
         <div class="control-group">
             <label>Точка Б (Финиш)</label>
             <div class="input-row">
-                <input type="text" id="end-lat" placeholder="Широта" readonly>
-                <input type="text" id="end-lon" placeholder="Долгота" readonly>
+                <input type="text" id="end-lat" placeholder="Широта" readonly style="flex: 1;">
+                <input type="text" id="end-lon" placeholder="Долгота" readonly style="flex: 1;">
+                <input type="text" id="end-unlocode" placeholder="UN/LOCODE" style="flex: 1.2;">
             </div>
-            <span class="instruction">Кликните на карту, чтобы задать</span>
+            <span class="instruction">Кликните на карту или введите UN/LOCODE</span>
         </div>
 
         <div class="control-group">
@@ -227,6 +246,14 @@
             <div class="stat-row" style="color: #ef4444;">
                 <span>Пессимистичный (95%):</span>
                 <span class="stat-value" id="res-time-pess">0 ч</span>
+            </div>
+            
+            <div id="script-container" class="script-panel">
+                <div class="script-header">
+                    <span>Python API Скрипт</span>
+                    <span style="font-size: 0.75rem; color: #94a3b8;">Выделите текст и нажмите Ctrl+C</span>
+                </div>
+                <code id="script-code" style="user-select: all; cursor: text;"></code>
             </div>
         </div>
     </aside>
@@ -303,13 +330,25 @@
         const inputs = {
             startLat: document.getElementById('start-lat'),
             startLon: document.getElementById('start-lon'),
+            startUnlocode: document.getElementById('start-unlocode'),
             endLat: document.getElementById('end-lat'),
-            endLon: document.getElementById('end-lon')
+            endLon: document.getElementById('end-lon'),
+            endUnlocode: document.getElementById('end-unlocode')
         };
         const calcBtn = document.getElementById('calc-btn');
         const cancelBtn = document.getElementById('cancel-btn');
         const resultsPanel = document.getElementById('results-panel');
         const errorBox = document.getElementById('error-box');
+
+        // Разблокировка кнопки при вводе UNLOCODE
+        const checkUnlocode = () => {
+            const hasStart = coords.start || inputs.startUnlocode.value;
+            const hasEnd = coords.end || inputs.endUnlocode.value;
+            calcBtn.disabled = !(hasStart && hasEnd);
+            if (hasStart && hasEnd) currentStep = 'ready';
+        };
+        inputs.startUnlocode.addEventListener('input', checkUnlocode);
+        inputs.endUnlocode.addEventListener('input', checkUnlocode);
 
         // Обработка клика
         map.on('click', (e) => {
@@ -329,12 +368,12 @@
                     coords.end = null;
                     inputs.endLat.value = '';
                     inputs.endLon.value = '';
-                    calcBtn.disabled = true;
                     
                     // Убираем старые линии
                     if (routeLayer) map.removeLayer(routeLayer);
                     if (progressPolyline) { map.removeLayer(progressPolyline); progressPolyline = null; }
                     resultsPanel.classList.remove('active');
+                    document.getElementById('script-container').classList.remove('active');
                 }
 
                 coords.start = { lat: parseFloat(lat), lon: parseFloat(lon) };
@@ -345,6 +384,7 @@
                 markers.start = L.marker([lat, lon]).addTo(map).bindPopup("Старт").openPopup();
                 
                 currentStep = 'end';
+                checkUnlocode();
             } 
             // Второй клик (Установка финиша)
             else if (currentStep === 'end') {
@@ -356,7 +396,7 @@
                 markers.end = L.marker([lat, lon]).addTo(map).bindPopup("Финиш").openPopup();
                 
                 currentStep = 'ready';
-                calcBtn.disabled = false;
+                checkUnlocode();
                 errorBox.style.display = 'none';
             }
         });
@@ -370,12 +410,15 @@
 
         // Запуск расчета через WebSocket
         calcBtn.addEventListener('click', () => {
-            if (!coords.start || !coords.end) return;
+            const hasStart = coords.start || inputs.startUnlocode.value;
+            const hasEnd = coords.end || inputs.endUnlocode.value;
+            if (!hasStart || !hasEnd) return;
 
             // UI сброс
             if (routeLayer) map.removeLayer(routeLayer);
             if (progressPolyline) { map.removeLayer(progressPolyline); progressPolyline = null; }
             resultsPanel.classList.remove('active');
+            document.getElementById('script-container').classList.remove('active');
             errorBox.style.display = 'none';
             
             calcBtn.style.display = 'none';
@@ -394,21 +437,57 @@
                 document.getElementById('res-time-pess').innerText = '-';
                 resultsPanel.classList.add('active');
 
-                 // Отправляем старт
                 const draftVal = document.getElementById('vessel-draft').value;
-                ws.send(JSON.stringify({
+                const requestPayload = {
                     action: "start",
-                    start_lon: coords.start.lon, 
-                    start_lat: coords.start.lat,
-                    end_lon: coords.end.lon, 
-                    end_lat: coords.end.lat,
                     vessel_type: document.getElementById('vessel-type').value,
                     draft: draftVal ? parseFloat(draftVal) : null,
                     vessel_length: document.getElementById('vessel-length').value ? parseFloat(document.getElementById('vessel-length').value) : null,
                     vessel_width: document.getElementById('vessel-width').value ? parseFloat(document.getElementById('vessel-width').value) : null,
                     avoid_seca: document.getElementById('avoid-seca').checked,
                     calc_seca: document.getElementById('calc-seca').checked
-                }));
+                };
+
+                if (coords.start) {
+                    requestPayload.start_lon = coords.start.lon;
+                    requestPayload.start_lat = coords.start.lat;
+                }
+                if (coords.end) {
+                    requestPayload.end_lon = coords.end.lon;
+                    requestPayload.end_lat = coords.end.lat;
+                }
+                if (inputs.startUnlocode.value) requestPayload.start_unlocode = inputs.startUnlocode.value;
+                if (inputs.endUnlocode.value) requestPayload.end_unlocode = inputs.endUnlocode.value;
+
+                // Отправляем старт
+                ws.send(JSON.stringify(requestPayload));
+
+                // Генерируем Python скрипт
+                const scriptHost = window.location.origin;
+                const pyPayload = { ...requestPayload };
+                delete pyPayload.action;
+                
+                // Конвертируем JSON в валидный синтаксис Python словаря
+                const payloadStr = JSON.stringify(pyPayload, null, 4)
+                    .replace(/: null/g, ': None')
+                    .replace(/: false/g, ': False')
+                    .replace(/: true/g, ': True');
+                    
+                const pyScript = `import requests
+import json
+
+url = "${scriptHost}/api/route"
+payload = ${payloadStr}
+
+response = requests.post(url, json=payload)
+if response.status_code == 200:
+    with open("route.geojson", "w", encoding="utf-8") as f:
+        json.dump(response.json(), f, ensure_ascii=False, indent=2)
+    print("Маршрут успешно сохранен в route.geojson")
+else:
+    print("Ошибка:", response.status_code, response.text)
+`;
+                document.getElementById('script-code').innerText = pyScript;
             };
 
             ws.onmessage = (event) => {
@@ -453,11 +532,21 @@
                     }
 
                     if (props.actual_start_lonlat) {
-                        markers.start.setLatLng([props.actual_start_lonlat[1], props.actual_start_lonlat[0]]);
+                        if (markers.start) {
+                            markers.start.setLatLng([props.actual_start_lonlat[1], props.actual_start_lonlat[0]]);
+                        } else {
+                            markers.start = L.marker([props.actual_start_lonlat[1], props.actual_start_lonlat[0]]).addTo(map).bindPopup("Старт").openPopup();
+                        }
                     }
                     if (props.actual_end_lonlat) {
-                        markers.end.setLatLng([props.actual_end_lonlat[1], props.actual_end_lonlat[0]]);
+                        if (markers.end) {
+                            markers.end.setLatLng([props.actual_end_lonlat[1], props.actual_end_lonlat[0]]);
+                        } else {
+                            markers.end = L.marker([props.actual_end_lonlat[1], props.actual_end_lonlat[0]]).addTo(map).bindPopup("Финиш").openPopup();
+                        }
                     }
+                    
+                    document.getElementById('script-container').classList.add('active');
                     ws.close();
                 } 
                 else if (data.type === 'error' || data.type === 'info') {
