@@ -10,6 +10,7 @@ import rasterio
 from scipy.ndimage import label
 from typing import Tuple, List, Optional, Dict, Any, Callable
 from dataclasses import dataclass
+from shapely.geometry import LineString
 
 EARTH_RADIUS_KM = 6371.0
 KNOT_TO_KMH = 1.852
@@ -432,6 +433,42 @@ class SphericalRasterRouter:
             curr_idx = came_from.get(curr_idx, -1)
         path_coords.reverse()
         
+        # 1. Точный расчет времени, дистанции и SECA по ПЛОТНОЙ сетке
+        N_DENSE = len(path_coords) - 1
+        dense_dists = np.zeros(N_DENSE) if N_DENSE > 0 else np.zeros(0)
+        dense_means = np.zeros(N_DENSE) if N_DENSE > 0 else np.zeros(0)
+        dense_sds = np.zeros(N_DENSE) if N_DENSE > 0 else np.zeros(0)
+        seca_distance_total = 0.0
+
+        for i in range(N_DENSE):
+            p1, p2 = path_coords[i], path_coords[i+1]
+            d_km = self._haversine_distance(*p1, *p2)
+            dense_dists[i] = d_km
+            mr, mc = self._coord_to_index((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
+            dense_means[i] = max(self.speed_raster[mr, mc], 1.0)
+            dense_sds[i] = max(self.sd_raster[mr, mc], 0.1)
+            
+            if calc_seca and self.seca_raster is not None and self.seca_raster[mr, mc] > 0:
+                seca_distance_total += d_km
+
+        time_mean, time_q05, time_q95 = 0.0, 0.0, 0.0
+        if N_DENSE > 0:
+            shape = (dense_means / dense_sds) ** 2
+            scale = (dense_sds ** 2) / dense_means
+            sim_speeds = np.maximum(np.random.gamma(shape[:, None], scale[:, None], size=(N_DENSE, 10000)), 1.0)
+            sim_times = dense_dists[:, None] / sim_speeds
+            total_times = np.sum(sim_times, axis=0)
+            time_mean = float(np.mean(total_times))
+            time_q05 = float(np.percentile(total_times, 5))
+            time_q95 = float(np.percentile(total_times, 95))
+            
+        total_dist = float(np.sum(dense_dists))
+
+        # 2. Упрощение сырой геометрии (алгоритм Дугласа-Пекера, ~2-3 км толерантность)
+        if len(path_coords) > 2:
+            path_coords = list(LineString(path_coords).simplify(0.02, preserve_topology=False).coords)
+
+        # 3. Алгоритм Чайкина для скругления оставшихся поворотов
         smoothed = path_coords
         for _ in range(2):
             if len(smoothed) <= 2: break
@@ -442,13 +479,15 @@ class SphericalRasterRouter:
                                  (0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1])])
             new_path.append(smoothed[-1])
             smoothed = new_path
+            
+        # 4. Финальное удаление избыточных точек после сглаживания
+        if len(smoothed) > 2:
+            smoothed = list(LineString(smoothed).simplify(0.005, preserve_topology=False).coords)
 
+        # 5. Грубые сегменты для контракта API (чтобы не отдавать пустые массивы)
         N_SEGMENTS = len(smoothed) - 1
         dists_km = np.zeros(N_SEGMENTS) if N_SEGMENTS > 0 else np.zeros(0)
         means = np.zeros(N_SEGMENTS) if N_SEGMENTS > 0 else np.zeros(0)
-        sds = np.zeros(N_SEGMENTS) if N_SEGMENTS > 0 else np.zeros(0)
-
-        seca_distance_total = 0.0
 
         for i in range(N_SEGMENTS):
             p1, p2 = smoothed[i], smoothed[i+1]
@@ -456,25 +495,10 @@ class SphericalRasterRouter:
             dists_km[i] = d_km
             mr, mc = self._coord_to_index((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
             means[i] = max(self.speed_raster[mr, mc], 1.0)
-            sds[i] = max(self.sd_raster[mr, mc], 0.1)
-            
-            if calc_seca and self.seca_raster is not None and self.seca_raster[mr, mc] > 0:
-                seca_distance_total += d_km
-
-        time_mean, time_q05, time_q95 = 0.0, 0.0, 0.0
-        if N_SEGMENTS > 0:
-            shape = (means / sds) ** 2
-            scale = (sds ** 2) / means
-            sim_speeds = np.maximum(np.random.gamma(shape[:, None], scale[:, None], size=(N_SEGMENTS, 10000)), 1.0)
-            sim_times = dists_km[:, None] / sim_speeds
-            total_times = np.sum(sim_times, axis=0)
-            time_mean = float(np.mean(total_times))
-            time_q05 = float(np.percentile(total_times, 5))
-            time_q95 = float(np.percentile(total_times, 95))
 
         return RouteResult(
             path_coords=smoothed,
-            total_distance_km=float(np.sum(dists_km)),
+            total_distance_km=total_dist,
             time_mean_hours=time_mean,
             time_q05_hours=time_q05,
             time_q95_hours=time_q95,
