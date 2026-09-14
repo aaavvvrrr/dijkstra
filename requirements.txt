@@ -8,3 +8,4 @@ rasterio
 rio-tiler
 Pillow
 matplotlib
+geopandas

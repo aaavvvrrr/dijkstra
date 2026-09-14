@@ -200,7 +200,15 @@
                 <input type="number" id="vessel-length" placeholder="Длина (м)" min="0">
                 <input type="number" id="vessel-width" placeholder="Ширина (м)" min="0">
             </div>
-            <input type="number" id="vessel-draft" placeholder="Осадка (м) — опционально" step="0.1" min="0">
+            <input type="number" id="vessel-draft" placeholder="Осадка (м) — опционально" step="0.1" min="0" style="margin-bottom: 8px;">
+            <input type="number" id="vessel-speed" placeholder="Средняя скорость (узлы) — опционально" step="0.1" min="1">
+        </div>
+
+        <div class="control-group" style="max-height: 256px;overflow: auto;">
+            <label id="chokepoints-label">Исключить узкие места (Chokepoints)</label>
+            <div id="chokepoints-container">
+                <!-- Чекбоксы узких мест будут загружены динамически -->
+            </div>
         </div>
 
         <div class="control-group">
@@ -277,6 +285,7 @@
         const depthLayer = L.tileLayer('/tiles/depth/{z}/{x}/{y}.png', { opacity: 0.8, maxZoom: 10 });
         const wavesLayer = L.tileLayer('/tiles/waves/{z}/{x}/{y}.png', { opacity: 0.7, maxZoom: 10 });
         const secaLayer = L.tileLayer('/tiles/seca/{z}/{x}/{y}.png', { opacity: 0.8, maxZoom: 10 });
+        const chokepointsLayer = L.tileLayer('/tiles/chokepoints/{z}/{x}/{y}.png', { opacity: 0.8, maxZoom: 10 });
         const debugGridLayer = L.tileLayer('/tiles/debug/{z}/{x}/{y}.png', { opacity: 0.7, maxZoom: 10 });
 
         const overlayMaps = {
@@ -285,12 +294,31 @@
             "Батиметрия (Глубины)": depthLayer,
             "Волнение (Погода)": wavesLayer,
             "Зоны SECA": secaLayer,
+            "Узкие места (Chokepoints)": chokepointsLayer,
             "Связность морей (Грубая)": debugGridLayer
         };
         L.control.layers({"Базовая карта": baseMap}, overlayMaps, {collapsed: false}).addTo(map);
 
         // По умолчанию включим скорость
         effSpeedLayer.addTo(map);
+
+        // Загрузка списка узких мест
+        fetch('/api/chokepoints')
+            .then(res => res.json())
+            .then(data => {
+                const container = document.getElementById('chokepoints-container');
+                if (!container || Object.keys(data).length === 0) {
+                    document.getElementById('chokepoints-label').style.display = 'none';
+                    return;
+                }
+                for (const [id, cp] of Object.entries(data)) {
+                    const label = document.createElement('label');
+                    label.className = 'checkbox-label';
+                    label.innerHTML = `<input type="checkbox" class="forbidden-cp" value="${id}"> ${cp.name}`;
+                    container.appendChild(label);
+                }
+            })
+            .catch(err => console.error("Ошибка загрузки chokepoints:", err));
 
         // Загрузка векторной маски (Контуры берегов)
         fetch('/static/oceans-seas.geo.json')
@@ -438,12 +466,17 @@
                 resultsPanel.classList.add('active');
 
                 const draftVal = document.getElementById('vessel-draft').value;
+                const speedVal = document.getElementById('vessel-speed').value;
+                const forbiddenCPs = Array.from(document.querySelectorAll('.forbidden-cp:checked')).map(cb => parseInt(cb.value));
+
                 const requestPayload = {
                     action: "start",
                     vessel_type: document.getElementById('vessel-type').value,
                     draft: draftVal ? parseFloat(draftVal) : null,
                     vessel_length: document.getElementById('vessel-length').value ? parseFloat(document.getElementById('vessel-length').value) : null,
                     vessel_width: document.getElementById('vessel-width').value ? parseFloat(document.getElementById('vessel-width').value) : null,
+                    average_speed: speedVal ? parseFloat(speedVal) : null,
+                    forbidden_chokepoints: forbiddenCPs,
                     avoid_seca: document.getElementById('avoid-seca').checked,
                     calc_seca: document.getElementById('calc-seca').checked
                 };

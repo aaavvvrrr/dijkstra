@@ -208,8 +208,9 @@ class SphericalRasterRouter:
                 is_deep_enough = True
                 
                 if min_depth and self.depth_raster is not None:
-                    # В GEBCO океан - это отрицательные высоты (напр. -15 = 15м глубины)
-                    water_depth = abs(self.depth_raster[cr, cc])
+                    # В GEBCO океан - это отрицательные высоты (напр. -15 = 15м глубины).
+                    # Инвертируем знак, чтобы суша (высота > 0) уходила в минус и безопасно отсекалась.
+                    water_depth = -self.depth_raster[cr, cc]
                     if water_depth < min_depth:
                         is_deep_enough = False
                         
@@ -324,6 +325,9 @@ class SphericalRasterRouter:
                 elif vessel_draft and cp_data.get("max_draft") and vessel_draft > cp_data["max_draft"]:
                     forbidden_cp.add(cp_id)
 
+        custom_speed_knots = request_params.get("average_speed")
+        custom_speed_kmh = custom_speed_knots * KNOT_TO_KMH if custom_speed_knots else None
+
         speed_raster = self.speed_raster
         dx_per_row = self.dx_per_row
         dy_km = self.dy_km
@@ -338,7 +342,7 @@ class SphericalRasterRouter:
 
             if idx == goal_idx:
                 print(f"✅ Точный финиш найден! Время: {time.time() - t_start:.2f} сек.")
-                res = self._reconstruct_and_simulate(came_from, gr, gc, sr, sc, calc_seca)
+                res = self._reconstruct_and_simulate(came_from, gr, gc, sr, sc, calc_seca, custom_speed_kmh)
                 self.speed_raster = old_speed_raster
                 self.sd_raster = old_sd_raster
                 return res
@@ -372,9 +376,13 @@ class SphericalRasterRouter:
                 speed = speed_raster[nr, nc]
                 if speed <= 0: continue
                 
+                # Переопределяем скорость, если задана явно
+                if custom_speed_kmh: 
+                    speed = custom_speed_kmh
+                
                 # O(1) Проверка батиметрии
                 if min_depth and self.depth_raster is not None:
-                    water_depth = abs(self.depth_raster[nr, nc])
+                    water_depth = -self.depth_raster[nr, nc]
                     if water_depth < min_depth: continue
 
                 # O(1) Проверка узких мест
@@ -401,7 +409,7 @@ class SphericalRasterRouter:
                         if dist_to_goal <= TARGET_RADIUS_KM:
                             came_from[n_idx] = idx
                             print(f"⚓ Захват рейда ({TARGET_RADIUS_KM} км до цели)! Время: {time.time() - t_start:.2f} сек.")
-                            return self._reconstruct_and_simulate(came_from, nr, nc, sr, sc, calc_seca)
+                            return self._reconstruct_and_simulate(came_from, nr, nc, sr, sc, calc_seca, custom_speed_kmh)
                     
                     costs_to_reach[n_idx] = new_cost
                     came_from[n_idx] = idx
@@ -416,7 +424,7 @@ class SphericalRasterRouter:
                         if dist_to_goal <= TARGET_RADIUS_KM:
                             came_from[n_idx] = idx
                             print(f"⚓ Захват рейда ({TARGET_RADIUS_KM} км до цели)! Время: {time.time() - t_start:.2f} сек.")
-                            res = self._reconstruct_and_simulate(came_from, nr, nc, sr, sc, calc_seca)
+                            res = self._reconstruct_and_simulate(came_from, nr, nc, sr, sc, calc_seca, custom_speed_kmh)
                             self.speed_raster = old_speed_raster
                             self.sd_raster = old_sd_raster
                             return res
@@ -425,7 +433,7 @@ class SphericalRasterRouter:
         self.sd_raster = old_sd_raster
         return None
 
-    def _reconstruct_and_simulate(self, came_from: dict, gr: int, gc: int, sr: int, sc: int, calc_seca: bool = False) -> RouteResult:
+    def _reconstruct_and_simulate(self, came_from: dict, gr: int, gc: int, sr: int, sc: int, calc_seca: bool = False, custom_speed_kmh: Optional[float] = None) -> RouteResult:
         path_coords = []
         curr_idx = gr * self.cols + gc
         while curr_idx != -1:
@@ -445,8 +453,13 @@ class SphericalRasterRouter:
             d_km = self._haversine_distance(*p1, *p2)
             dense_dists[i] = d_km
             mr, mc = self._coord_to_index((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
-            dense_means[i] = max(self.speed_raster[mr, mc], 1.0)
-            dense_sds[i] = max(self.sd_raster[mr, mc], 0.1)
+            
+            if custom_speed_kmh:
+                dense_means[i] = custom_speed_kmh
+                dense_sds[i] = max(custom_speed_kmh * 0.1, 0.1) # Имитируем небольшую дисперсию (10%)
+            else:
+                dense_means[i] = max(self.speed_raster[mr, mc], 1.0)
+                dense_sds[i] = max(self.sd_raster[mr, mc], 0.1)
             
             if calc_seca and self.seca_raster is not None and self.seca_raster[mr, mc] > 0:
                 seca_distance_total += d_km
@@ -494,7 +507,7 @@ class SphericalRasterRouter:
             d_km = self._haversine_distance(*p1, *p2)
             dists_km[i] = d_km
             mr, mc = self._coord_to_index((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
-            means[i] = max(self.speed_raster[mr, mc], 1.0)
+            means[i] = custom_speed_kmh if custom_speed_kmh else max(self.speed_raster[mr, mc], 1.0)
 
         return RouteResult(
             path_coords=smoothed,

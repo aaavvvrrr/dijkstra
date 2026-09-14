@@ -103,16 +103,80 @@ class RasterPreprocessor:
         )
         self._write_raster(seca_mask, out_seca_tif, dtype='uint8', nodata=0)
 
-    def process_chokepoints(self, cp_geojson: str, out_cp_tif: str):
+    def compile_chokepoints_folder(self, folder_path: str, out_geojson: str, out_config: str):
+        """Автоматически склеивает множество KML/SHP файлов узких мест в единый GeoJSON и формирует конфиг."""
+        import glob
+        import math
+        import pandas as pd
+        import fiona
+        
+        # Включаем поддержку чтения KML в fiona/geopandas
+        fiona.drvsupport.supported_drivers['KML'] = 'rw'
+        fiona.drvsupport.supported_drivers['LIBKML'] = 'rw'
+        
+        files = glob.glob(os.path.join(folder_path, "*.kml")) + glob.glob(os.path.join(folder_path, "*.shp"))
+        if not files:
+            print(f"⚠️ Файлы узких мест не найдены в {folder_path}")
+            return
+            
+        print(f"⚓ Найдено {len(files)} файлов узких мест. Начинаем парсинг и склейку...")
+        
+        all_gdfs = []
+        config_data = {}
+        current_id = 1
+        
+        for fpath in files:
+            try:
+                gdf = gpd.read_file(fpath)
+                for _, row in gdf.iterrows():
+                    # Пытаемся достать названия (EN или RU)
+                    name = row.get("Name_EN") if "Name_EN" in row and pd.notna(row.get("Name_EN")) else row.get("Name_RU")
+                    if pd.isna(name) or not name: 
+                        name = os.path.basename(fpath).rsplit('.', 1)[0]
+                    
+                    # Достаем лимиты, если они есть
+                    draft = float(row["Draught"]) if "Draught" in row and pd.notna(row["Draught"]) else None
+                    width = float(row["Width"]) if "Width" in row and pd.notna(row["Width"]) else None
+                    length = float(row["Length"]) if "Length" in row and pd.notna(row["Length"]) else None
+                    
+                    # Сохраняем в конфигурационный словарь
+                    config_data[str(current_id)] = {"name": str(name)}
+                    if length and not math.isnan(length): config_data[str(current_id)]["max_length"] = length
+                    if width and not math.isnan(width): config_data[str(current_id)]["max_width"] = width
+                    if draft and not math.isnan(draft): config_data[str(current_id)]["max_draft"] = draft
+                    
+                    # Оставляем только нужную геометрию и сгенерированный id
+                    clean_row = gpd.GeoDataFrame({"id": [current_id], "geometry": [row.geometry]}, crs=gdf.crs)
+                    all_gdfs.append(clean_row)
+                    
+                    current_id += 1
+            except Exception as e:
+                print(f"❌ Ошибка обработки файла {fpath}: {e}")
+                
+        if all_gdfs:
+            merged_gdf = pd.concat(all_gdfs, ignore_index=True)
+            # Принудительно приводим к EPSG:4326 для консистентности
+            if merged_gdf.crs != "EPSG:4326":
+                merged_gdf = merged_gdf.to_crs("EPSG:4326")
+                
+            merged_gdf.to_file(out_geojson, driver="GeoJSON")
+            with open(out_config, "w", encoding="utf-8") as f:
+                json.dump(config_data, f, ensure_ascii=False, indent=2)
+            print(f"✅ Успешно склеено {current_id - 1} полигонов. Сохранены {os.path.basename(out_geojson)} и {os.path.basename(out_config)}")
+
+    def process_chokepoints(self, cp_file: str, out_cp_tif: str):
         """Создает растр узких мест (значение = id из свойств). uint16."""
         if not self.shape or not self.transform:
             raise ValueError("Сначала проинициализируйте meta")
             
-        print(f"⚓ Генерация растра узких мест из: {os.path.basename(cp_geojson)}")
-        gdf = self._read_and_fix_geojson(cp_geojson)
+        print(f"⚓ Генерация растра узких мест из: {os.path.basename(cp_file)}")
+        if cp_file.lower().endswith(".shp"):
+            gdf = gpd.read_file(cp_file)
+        else:
+            gdf = self._read_and_fix_geojson(cp_file)
         
-        # Предполагаем, что в GeoJSON есть свойство 'id'
-        shapes = ((geom, int(row.get('id', 1))) for geom, row in zip(gdf.geometry, gdf.properties))
+        # GeoDataFrame разворачивает свойства в столбцы. Избегаем ошибки AttributeError
+        shapes = ((row.geometry, int(row['id']) if 'id' in row else 1) for _, row in gdf.iterrows())
         
         cp_mask = rasterize(
             shapes=shapes,
@@ -335,10 +399,10 @@ if __name__ == "__main__":
         "gebco_bathymetry": False,
         
         # [СТАТИКА] Растеризация узких мест Суэц/Панама (Запускать 1 раз)
-        "chokepoints": False,
+        "chokepoints": True,
         
         # [ДИНАМИКА] Скачивание погоды/волнения (Запускать регулярно по CRON)
-        "waves_weather": True 
+        "waves_weather": False
     }
 
     print("\n=== СТАРТ ПАЙПЛАЙНА ПРЕДОБРАБОТКИ ===")
@@ -374,14 +438,22 @@ if __name__ == "__main__":
         )
 
     if RUN_STEPS["chokepoints"]:
-        cp_file = f"{config['paths']['raw_dir']}/chokepoints.geo.json"
-        if os.path.exists(cp_file):
+        raw_cp_folder = f"{config['paths']['raw_dir']}/chokepoints_raw"
+        cp_geo_out = f"{config['paths']['raw_dir']}/chokepoints.geo.json"
+        cp_config_out = f"{config['paths']['processed_dir']}/chokepoints_config.json"
+        
+        # Шаг 1: Автоматическая склейка KML/SHP из папки
+        if os.path.exists(raw_cp_folder):
+            preprocessor.compile_chokepoints_folder(raw_cp_folder, cp_geo_out, cp_config_out)
+        
+        # Шаг 2: Растеризация единого файла
+        if os.path.exists(cp_geo_out):
             preprocessor.process_chokepoints(
-                cp_geojson=cp_file,
+                cp_file=cp_geo_out,
                 out_cp_tif=f"{config['paths']['processed_dir']}/chokepoints.tif"
             )
         else:
-            print(f"⏭️ Пропуск chokepoints: файл {cp_file} не найден.")
+            print(f"⏭️ Пропуск chokepoints: файл {cp_geo_out} не найден.")
 
     if RUN_STEPS["waves_weather"]:
         w_conf = config["waves"]

@@ -50,6 +50,7 @@ class RouteRequest(BaseModel):
     vessel_length: Optional[float] = Field(default=None, description="Длина судна в метрах")
     vessel_width: Optional[float] = Field(default=None, description="Ширина судна в метрах")
     forbidden_chokepoints: Optional[list[int]] = Field(default_factory=list, description="Список ID узких мест для запрета")
+    average_speed: Optional[float] = Field(default=None, description="Заданная средняя скорость судна (узлы)")
     avoid_seca: bool = Field(default=False, description="Минимизировать движение по SECA")
     calc_seca: bool = Field(default=False, description="Считать дистанцию по SECA")
 
@@ -109,6 +110,12 @@ async def calculate_route_api(req: RouteRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {str(e)}")
+
+@app.get("/api/chokepoints")
+def get_chokepoints_config():
+    if not router_instance or not router_instance.cp_config:
+        return {}
+    return router_instance.cp_config
 
 # =======================================================
 # API ОТЛАДКИ РАСТРА
@@ -207,6 +214,8 @@ def get_tile(layer: str, z: int, x: int, y: int):
         filepath = os.path.join(DATA_DIR, "seca_mask.tif")
     elif layer == "depth":
         filepath = os.path.join(DATA_DIR, "depth_meters.tif")
+    elif layer == "chokepoints":
+        filepath = os.path.join(DATA_DIR, "chokepoints.tif")
     elif layer == "waves":
         # Берем путь к волнению прямо из конфига
         wave_path = APP_CONFIG["waves"]["output_file"]
@@ -241,6 +250,11 @@ def get_tile(layer: str, z: int, x: int, y: int):
             elif layer == "seca":
                 # Только зоны SECA (значение 1) - оранжевый полупрозрачный
                 _cmap = {1: (249, 115, 22, 150)}
+                png_bytes = img.render(img_format="PNG", colormap=_cmap)
+                
+            elif layer == "chokepoints":
+                # Узкие места: закрашиваем все доступные ID фиолетовым цветом
+                _cmap = {i: (168, 85, 247, 200) for i in range(1, 1000)}
                 png_bytes = img.render(img_format="PNG", colormap=_cmap)
                 
             elif layer == "depth":
