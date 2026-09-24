@@ -2,4 +2,4 @@ data
 app/__pycache__/*
 make_prompt/prompt.md
 files/*
-make_prompt/make_prompt.py
+make_prompt/make_prompt_drive.py

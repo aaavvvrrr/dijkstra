@@ -193,18 +193,20 @@ class SphericalRasterRouter:
             
         self.rasters_cache[vessel_type] = {"speed": speed_arr, "sd": sd_arr}
 
-    def _get_nearest_water_point(self, start_row: int, start_col: int, max_radius: int = 300, required_draft: Optional[float] = None) -> Optional[Tuple[int, int, int]]:
+    def _get_nearest_water_point(self, start_row: int, start_col: int, max_radius: int = 300, required_draft: Optional[float] = None, speed_raster: Optional[np.ndarray] = None) -> Optional[Tuple[int, int, int]]:
         queue = deque([(start_row, start_col)])
         visited = {(start_row, start_col)}
         
         # Запас 2 метра "под килем" (Under Keel Clearance)
         min_depth = (required_draft + 2.0) if required_draft else None
+        
+        current_speed_raster = speed_raster if speed_raster is not None else self.speed_raster
 
         while queue:
             cr, cc = queue.popleft()
             if abs(cr - start_row) > max_radius or abs(cc - start_col) > max_radius: continue
             
-            if self.speed_raster[cr, cc] > 0.5:
+            if current_speed_raster[cr, cc] > 0.5:
                 is_deep_enough = True
                 
                 if min_depth and self.depth_raster is not None:
@@ -274,13 +276,11 @@ class SphericalRasterRouter:
         vessel_type = request_params.get("vessel_type", "all")
 
         self._load_vessel_rasters(vessel_type)
-        old_speed_raster = self.speed_raster
-        old_sd_raster = self.sd_raster
-        self.speed_raster = self.rasters_cache[vessel_type]["speed"]
-        self.sd_raster = self.rasters_cache[vessel_type]["sd"]
+        req_speed_raster = self.rasters_cache[vessel_type]["speed"]
+        req_sd_raster = self.rasters_cache[vessel_type]["sd"]
 
-        start_pt_info = self._get_nearest_water_point(sr, sc, required_draft=vessel_draft)
-        goal_pt_info = self._get_nearest_water_point(gr, gc, required_draft=vessel_draft)
+        start_pt_info = self._get_nearest_water_point(sr, sc, required_draft=vessel_draft, speed_raster=req_speed_raster)
+        goal_pt_info = self._get_nearest_water_point(gr, gc, required_draft=vessel_draft, speed_raster=req_speed_raster)
         
         if not start_pt_info: raise ValueError("Точка старта слишком далеко от воды (или недостаточная глубина).")
         if not goal_pt_info: raise ValueError("Точка финиша слишком далеко от воды (или недостаточная глубина).")
@@ -298,7 +298,6 @@ class SphericalRasterRouter:
         if coarse_h[sr // self.scale, sc // self.scale] == np.inf:
             raise ValueError("Ошибка иерархической сетки: внутренний разрыв.")
 
-        cols = self.rows
         cols = self.cols
         start_idx = sr * cols + sc
         goal_idx = gr * cols + gc
@@ -328,7 +327,7 @@ class SphericalRasterRouter:
         custom_speed_knots = request_params.get("average_speed")
         custom_speed_kmh = custom_speed_knots * KNOT_TO_KMH if custom_speed_knots else None
 
-        speed_raster = self.speed_raster
+        speed_raster = req_speed_raster
         dx_per_row = self.dx_per_row
         dy_km = self.dy_km
         rows = self.rows
@@ -342,10 +341,7 @@ class SphericalRasterRouter:
 
             if idx == goal_idx:
                 print(f"✅ Точный финиш найден! Время: {time.time() - t_start:.2f} сек.")
-                res = self._reconstruct_and_simulate(came_from, gr, gc, sr, sc, calc_seca, custom_speed_kmh)
-                self.speed_raster = old_speed_raster
-                self.sd_raster = old_sd_raster
-                return res
+                return self._reconstruct_and_simulate(came_from, gr, gc, sr, sc, calc_seca, custom_speed_kmh, req_speed_raster, req_sd_raster)
 
             if current_cost > costs_to_reach.get(idx, float('inf')): continue
 
@@ -404,42 +400,31 @@ class SphericalRasterRouter:
                 n_idx = nr * cols + nc
                 
                 if new_cost < costs_to_reach.get(n_idx, float('inf')):
+                    costs_to_reach[n_idx] = new_cost
+                    came_from[n_idx] = idx
+
                     if abs(nr - gr) <= 15 and abs(nc - gc) <= 15:
                         dist_to_goal = math.hypot((nr - gr) * dx_per_row[nr], (nc - gc) * dy_km)
                         if dist_to_goal <= TARGET_RADIUS_KM:
-                            came_from[n_idx] = idx
                             print(f"⚓ Захват рейда ({TARGET_RADIUS_KM} км до цели)! Время: {time.time() - t_start:.2f} сек.")
-                            return self._reconstruct_and_simulate(came_from, nr, nc, sr, sc, calc_seca, custom_speed_kmh)
-                    
-                    costs_to_reach[n_idx] = new_cost
-                    came_from[n_idx] = idx
-                    
+                            return self._reconstruct_and_simulate(came_from, nr, nc, sr, sc, calc_seca, custom_speed_kmh, req_speed_raster, req_sd_raster)
+
                     # h_time - это эвристика времени. Умножение на 1.2 делает Weighted A*
                     f_score = new_cost + 1.2 * h_time
                     heapq.heappush(pq, (f_score, new_cost, nr, nc))
 
-                            
-                    if abs(nr - gr) <= 15 and abs(nc - gc) <= 15:
-                        dist_to_goal = math.hypot((nr - gr) * dx_per_row[nr], (nc - gc) * dy_km)
-                        if dist_to_goal <= TARGET_RADIUS_KM:
-                            came_from[n_idx] = idx
-                            print(f"⚓ Захват рейда ({TARGET_RADIUS_KM} км до цели)! Время: {time.time() - t_start:.2f} сек.")
-                            res = self._reconstruct_and_simulate(came_from, nr, nc, sr, sc, calc_seca, custom_speed_kmh)
-                            self.speed_raster = old_speed_raster
-                            self.sd_raster = old_sd_raster
-                            return res
-
-        self.speed_raster = old_speed_raster
-        self.sd_raster = old_sd_raster
         return None
 
-    def _reconstruct_and_simulate(self, came_from: dict, gr: int, gc: int, sr: int, sc: int, calc_seca: bool = False, custom_speed_kmh: Optional[float] = None) -> RouteResult:
+    def _reconstruct_and_simulate(self, came_from: dict, gr: int, gc: int, sr: int, sc: int, calc_seca: bool = False, custom_speed_kmh: Optional[float] = None, speed_raster: Optional[np.ndarray] = None, sd_raster: Optional[np.ndarray] = None) -> RouteResult:
         path_coords = []
         curr_idx = gr * self.cols + gc
         while curr_idx != -1:
             path_coords.append(self._index_to_coord(curr_idx // self.cols, curr_idx % self.cols))
             curr_idx = came_from.get(curr_idx, -1)
         path_coords.reverse()
+        
+        current_speed_raster = speed_raster if speed_raster is not None else self.speed_raster
+        current_sd_raster = sd_raster if sd_raster is not None else self.sd_raster
         
         # 1. Точный расчет времени, дистанции и SECA по ПЛОТНОЙ сетке
         N_DENSE = len(path_coords) - 1
@@ -458,8 +443,8 @@ class SphericalRasterRouter:
                 dense_means[i] = custom_speed_kmh
                 dense_sds[i] = max(custom_speed_kmh * 0.1, 0.1) # Имитируем небольшую дисперсию (10%)
             else:
-                dense_means[i] = max(self.speed_raster[mr, mc], 1.0)
-                dense_sds[i] = max(self.sd_raster[mr, mc], 0.1)
+                dense_means[i] = max(current_speed_raster[mr, mc], 1.0)
+                dense_sds[i] = max(current_sd_raster[mr, mc], 0.1)
             
             if calc_seca and self.seca_raster is not None and self.seca_raster[mr, mc] > 0:
                 seca_distance_total += d_km
@@ -507,7 +492,7 @@ class SphericalRasterRouter:
             d_km = self._haversine_distance(*p1, *p2)
             dists_km[i] = d_km
             mr, mc = self._coord_to_index((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
-            means[i] = custom_speed_kmh if custom_speed_kmh else max(self.speed_raster[mr, mc], 1.0)
+            means[i] = custom_speed_kmh if custom_speed_kmh else max(current_speed_raster[mr, mc], 1.0)
 
         return RouteResult(
             path_coords=smoothed,

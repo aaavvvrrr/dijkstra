@@ -373,7 +373,6 @@
             const hasStart = coords.start || inputs.startUnlocode.value;
             const hasEnd = coords.end || inputs.endUnlocode.value;
             calcBtn.disabled = !(hasStart && hasEnd);
-            if (hasStart && hasEnd) currentStep = 'ready';
         };
         inputs.startUnlocode.addEventListener('input', checkUnlocode);
         inputs.endUnlocode.addEventListener('input', checkUnlocode);
@@ -544,7 +543,7 @@ else:
                     
                     const geojson = data.geojson;
                     routeLayer = L.geoJSON(geojson, {
-                        style: { color: 'var(--primary)', weight: 5, opacity: 0.9, dashArray: '8, 8' }
+                        style: { color: '#2563eb', weight: 5, opacity: 0.9, dashArray: '8, 8' }
                     }).addTo(map);
 
                     map.fitBounds(routeLayer.getBounds(), { padding: [50, 50] });
@@ -596,7 +595,9 @@ else:
                 calcBtn.style.display = 'block';
                 cancelBtn.style.display = 'none';
                 calcBtn.innerText = 'Построить маршрут';
-                currentStep = 'start'; 
+                const hasStart = coords.start || inputs.startUnlocode.value;
+                const hasEnd = coords.end || inputs.endUnlocode.value;
+                currentStep = (hasStart && hasEnd) ? 'ready' : currentStep;
             };
         });
     </script>
