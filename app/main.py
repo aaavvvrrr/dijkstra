@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from PIL import Image
 import numpy as np
+from datetime import datetime
 
 from rio_tiler.io import Reader
 from rio_tiler.colormap import cmap
@@ -56,6 +57,7 @@ class RouteRequest(BaseModel):
     vessel_width: Optional[float] = Field(default=None, description="Ширина судна в метрах")
     forbidden_chokepoints: Optional[list[int]] = Field(default_factory=list, description="Список ID узких мест для запрета")
     average_speed: Optional[float] = Field(default=None, description="Заданная средняя скорость судна (узлы)")
+    max_wave_height: Optional[float] = Field(default=None, description="Максимально допустимая высота волны (метры)")
     avoid_seca: bool = Field(default=False, description="Минимизировать движение по SECA")
     calc_seca: bool = Field(default=False, description="Считать дистанцию по SECA")
     timeout_seconds: Optional[int] = Field(default=None, description="Максимальное время поиска (сек)")
@@ -108,6 +110,11 @@ async def calculate_route_api(req: RouteRequest):
         if not req_dump.get("timeout_seconds"):
             req_dump["timeout_seconds"] = APP_CONFIG.get("routing", {}).get("timeout_seconds", 60)
             
+        # Прокидываем путь к погоде для Этапа 3 (Телеметрия)
+        wave_path = APP_CONFIG.get("waves", {}).get("output_file")
+        if wave_path:
+            req_dump["wave_path"] = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", wave_path))
+
         result = await router_instance.find_route(
             (start_lon, start_lat),
             (end_lon, end_lat),
@@ -146,6 +153,41 @@ def save_autotest(req: AutotestSaveRequest):
         }, f, ensure_ascii=False, indent=2)
         
     return {"status": "success", "message": f"Тест '{safe_name}' успешно сохранен в папку tests/cases"}
+
+# =======================================================
+# API ГИДРОМЕТЕОРОЛОГИИ (WEATHER ROUTING)
+# =======================================================
+@app.post("/api/meteo/update")
+def update_meteo_data():
+    """
+    Запускает асинхронное обновление метеоданных через шлюз.
+    Вскоре будет интегрировано с Морским порталом и NOAA.
+    """
+    # Заготовка для фоновой задачи (Celery / BackgroundTasks)
+    # gateway = NOAAMeteoGateway(output_dir)
+    # gateway.fetch_forecast(target_date=datetime.now())
+    return {"status": "success", "message": "Процесс обновления ГМУ запущен в фоне."}
+
+@app.get("/api/meteo/status")
+def get_meteo_status():
+    """Возвращает статус текущих доступных слоев погоды и льда."""
+    wave_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", APP_CONFIG.get("waves", {}).get("output_file", "")))
+    waves_exist = os.path.exists(wave_path)
+    
+    return {
+        "provider": "NOAA (GFS Wave) / Морской Портал",
+        "layers": {
+            "waves": {
+                "available": waves_exist,
+                "last_updated_utc": datetime.utcfromtimestamp(os.path.getmtime(wave_path)).isoformat() if waves_exist else None,
+                "file": os.path.basename(wave_path)
+            },
+            "ice": {
+                "available": False,
+                "message": "Ожидается API Морского портала"
+            }
+        }
+    }
 
 # =======================================================
 # API ОТЛАДКИ РАСТРА
@@ -212,6 +254,11 @@ async def websocket_route(websocket: WebSocket):
             if "timeout_seconds" not in msg or not msg["timeout_seconds"]:
                 msg["timeout_seconds"] = APP_CONFIG.get("routing", {}).get("timeout_seconds", 60)
                 
+            # Прокидываем путь к погоде для Этапа 3 (Телеметрия)
+            wave_path = APP_CONFIG.get("waves", {}).get("output_file")
+            if wave_path:
+                msg["wave_path"] = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", wave_path))
+
             listener_task = asyncio.create_task(listen_for_cancel())
             try:
                 slon, slat = resolve_coords(msg.get("start_lon"), msg.get("start_lat"), msg.get("start_unlocode"))

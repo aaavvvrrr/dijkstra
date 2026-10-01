@@ -28,6 +28,8 @@ class RouteResult:
     actual_start_coords: Tuple[float, float]
     actual_end_coords: Tuple[float, float]
     seca_distance_km: float = 0.0
+    segment_depths_m: List[float] = None
+    segment_waves_m: List[float] = None
 
     def to_geojson(self, request_params: dict = None) -> Dict[str, Any]:
         clean_coords = [[float(lon), float(lat)] for lon, lat in self.path_coords]
@@ -42,6 +44,8 @@ class RouteResult:
                 "distances_km": [round(float(d), 3) for d in self.segment_distances_km],
                 "speeds_kmh": [round(float(s), 2) for s in self.segment_speeds_kmh],
                 "times_hours": [round(float(t), 3) for t in self.segment_times_hours],
+                "depths_m": [round(float(d), 1) for d in self.segment_depths_m] if self.segment_depths_m else [],
+                "waves_m": [round(float(w), 2) for w in self.segment_waves_m] if self.segment_waves_m else [],
             },
             "actual_start_lonlat": [round(self.actual_start_coords[0], 6), round(self.actual_start_coords[1], 6)],
             "actual_end_lonlat": [round(self.actual_end_coords[0], 6), round(self.actual_end_coords[1], 6)],
@@ -342,6 +346,16 @@ class SphericalRasterRouter:
         custom_speed_knots = request_params.get("average_speed")
         custom_speed_kmh = custom_speed_knots * KNOT_TO_KMH if custom_speed_knots else None
         
+        # Метео-маршрутизация: Подготовка данных о волнении
+        max_wave_height = request_params.get("max_wave_height")
+        wave_path = request_params.get("wave_path")
+        wave_arr, wave_inv, wave_h, wave_w = None, None, 0, 0
+        if max_wave_height is not None and wave_path and os.path.exists(wave_path):
+            with rasterio.open(wave_path) as ds:
+                wave_arr = ds.read(1)
+                wave_inv = ~ds.transform
+                wave_h, wave_w = ds.height, ds.width
+        
         max_timeout = request_params.get("timeout_seconds")
         if not max_timeout:
             max_timeout = 60
@@ -360,7 +374,7 @@ class SphericalRasterRouter:
 
             if idx == goal_idx:
                 print(f"✅ Точный финиш найден! Время: {time.time() - t_start:.2f} сек.")
-                return self._reconstruct_and_simulate(came_from, gr, gc, sr, sc, calc_seca, custom_speed_kmh, req_speed_raster, req_sd_raster)
+                return self._reconstruct_and_simulate(came_from, gr, gc, sr, sc, calc_seca, custom_speed_kmh, req_speed_raster, req_sd_raster, request_params)
 
             if current_cost > costs_to_reach.get(idx, float('inf')): continue
 
@@ -407,6 +421,18 @@ class SphericalRasterRouter:
                     cp_val = self.cp_raster[nr, nc]
                     if cp_val > 0 and cp_val in forbidden_cp:
                         continue
+                        
+                # O(1) Проверка погоды (Огибание штормов)
+                if wave_arr is not None:
+                    # Быстрый пересчет координат пикселя сетки A* в пиксель матрицы GRIB2
+                    lon, lat = self.transform * (nc + 0.5, nr + 0.5)
+                    wc, wr = wave_inv * (lon, lat)
+                    wr, wc = int(wr), int(wc)
+                    if 0 <= wr < wave_h and 0 <= wc < wave_w:
+                        w_val = wave_arr[wr, wc]
+                        # Если значение валидное (меньше 100м) и превышает лимит судна - обходим стороной
+                        if w_val < 100.0 and w_val > max_wave_height:
+                            continue
                 
                 cr_c, cc_c = nr // self.scale, nc // self.scale
                 if cr_c >= self.coarse_rows or cc_c >= self.coarse_cols: continue
@@ -428,7 +454,7 @@ class SphericalRasterRouter:
                         dist_to_goal = math.hypot((nr - gr) * dx_per_row[nr], (nc - gc) * dy_km)
                         if dist_to_goal <= TARGET_RADIUS_KM:
                             print(f"⚓ Захват рейда ({TARGET_RADIUS_KM} км до цели)! Время: {time.time() - t_start:.2f} сек.")
-                            return self._reconstruct_and_simulate(came_from, nr, nc, sr, sc, calc_seca, custom_speed_kmh, req_speed_raster, req_sd_raster)
+                            return self._reconstruct_and_simulate(came_from, nr, nc, sr, sc, calc_seca, custom_speed_kmh, req_speed_raster, req_sd_raster, request_params)
 
                     # h_time - это эвристика времени. Умножение на 1.2 делает Weighted A*
                     f_score = new_cost + 1.2 * h_time
@@ -436,7 +462,8 @@ class SphericalRasterRouter:
 
         return None
 
-    def _reconstruct_and_simulate(self, came_from: dict, gr: int, gc: int, sr: int, sc: int, calc_seca: bool = False, custom_speed_kmh: Optional[float] = None, speed_raster: Optional[np.ndarray] = None, sd_raster: Optional[np.ndarray] = None) -> RouteResult:
+    def _reconstruct_and_simulate(self, came_from: dict, gr: int, gc: int, sr: int, sc: int, calc_seca: bool = False, custom_speed_kmh: Optional[float] = None, speed_raster: Optional[np.ndarray] = None, sd_raster: Optional[np.ndarray] = None, request_params: Optional[dict] = None) -> RouteResult:
+        request_params = request_params or {}
         path_coords = []
         curr_idx = gr * self.cols + gc
         while curr_idx != -1:
@@ -507,13 +534,40 @@ class SphericalRasterRouter:
         N_SEGMENTS = len(smoothed) - 1
         dists_km = np.zeros(N_SEGMENTS) if N_SEGMENTS > 0 else np.zeros(0)
         means = np.zeros(N_SEGMENTS) if N_SEGMENTS > 0 else np.zeros(0)
+        depths = np.zeros(N_SEGMENTS) if N_SEGMENTS > 0 else np.zeros(0)
+        waves = np.zeros(N_SEGMENTS) if N_SEGMENTS > 0 else np.zeros(0)
+
+        wave_path = request_params.get("wave_path")
+        wave_dataset = None
+        if wave_path and os.path.exists(wave_path):
+            try: wave_dataset = rasterio.open(wave_path)
+            except: pass
 
         for i in range(N_SEGMENTS):
             p1, p2 = smoothed[i], smoothed[i+1]
             d_km = self._haversine_distance(*p1, *p2)
             dists_km[i] = d_km
-            mr, mc = self._coord_to_index((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
+            
+            mlon, mlat = (p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0
+            mr, mc = self._coord_to_index(mlon, mlat)
             means[i] = custom_speed_kmh if custom_speed_kmh else max(current_speed_raster[mr, mc], 1.0)
+            
+            # Телеметрия: Глубина
+            if self.depth_raster is not None:
+                # В GEBCO океан отрицательный (-15 = 15м)
+                depths[i] = max(0.0, float(-self.depth_raster[mr, mc]))
+                
+            # Телеметрия: Волнение (сэмплинг на лету из GRIB2/TIF)
+            if wave_dataset is not None:
+                try:
+                    val = list(wave_dataset.sample([(mlon, mlat)]))[0][0]
+                    # Игнорируем nodata (обычно для волн > 100м это мусор)
+                    waves[i] = float(val) if val < 100 else 0.0
+                except:
+                    waves[i] = 0.0
+
+        if wave_dataset is not None:
+            wave_dataset.close()
 
         return RouteResult(
             path_coords=smoothed,
@@ -524,6 +578,8 @@ class SphericalRasterRouter:
             segment_distances_km=dists_km.tolist(),
             segment_speeds_kmh=means.tolist(),
             segment_times_hours=(dists_km / means).tolist() if N_SEGMENTS > 0 else [],
+            segment_depths_m=depths.tolist(),
+            segment_waves_m=waves.tolist(),
             actual_start_coords=self._index_to_coord(sr, sc),
             actual_end_coords=self._index_to_coord(gr, gc),
             seca_distance_km=seca_distance_total

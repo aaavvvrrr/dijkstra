@@ -160,6 +160,8 @@
             display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-family: sans-serif;
         }
     </style>
+    <!-- Chart.js для графиков телеметрии -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
 
@@ -202,8 +204,11 @@
                 <input type="number" id="vessel-length" placeholder="Длина (м)" min="0">
                 <input type="number" id="vessel-width" placeholder="Ширина (м)" min="0">
             </div>
-            <input type="number" id="vessel-draft" placeholder="Осадка (м) — опционально" step="0.1" min="0" style="margin-bottom: 8px;">
-            <input type="number" id="vessel-speed" placeholder="Средняя скорость (узлы) — опционально" step="0.1" min="1">
+            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                <input type="number" id="vessel-draft" placeholder="Осадка (м) — опц." step="0.1" min="0">
+                <input type="number" id="vessel-speed" placeholder="Ср. скорость (узлы)" step="0.1" min="1">
+            </div>
+            <input type="number" id="max-wave-height" placeholder="Макс. волна (м) — Weather Routing" step="0.5" min="0" style="margin-bottom: 8px; border-color: #f59e0b;">
         </div>
 
         <div class="control-group" style="max-height: 256px;overflow: auto;">
@@ -258,6 +263,11 @@
                 <span class="stat-value" id="res-time-pess">0 ч</span>
             </div>
             
+            <!-- Контейнер для графика телеметрии -->
+            <div id="chart-wrapper" style="position: relative; height: 180px; width: 100%; margin-top: 16px; display: none;">
+                <canvas id="telemetry-chart"></canvas>
+            </div>
+
             <button class="btn" id="save-test-btn" style="margin-top: 16px; background: #10b981; display: none;">💾 Сохранить как автотест</button>
 
             <div id="script-container" class="script-panel">
@@ -361,6 +371,63 @@
         
         let lastPayload = null;
         let lastGeojson = null;
+        let telemetryChart = null;
+
+        function renderTelemetryChart(segments) {
+            const ctx = document.getElementById('telemetry-chart').getContext('2d');
+            if (telemetryChart) telemetryChart.destroy();
+
+            let cumDist = 0;
+            const labels = segments.distances_km.map(d => {
+                cumDist += d;
+                return cumDist.toFixed(0);
+            });
+
+            telemetryChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Глубина (м)',
+                            data: segments.depths_m,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            yAxisID: 'y',
+                            fill: true,
+                            pointRadius: 0,
+                            borderWidth: 2,
+                            tension: 0.3
+                        },
+                        {
+                            label: 'Волна (м)',
+                            data: segments.waves_m,
+                            borderColor: '#f59e0b',
+                            backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                            yAxisID: 'y1',
+                            fill: true,
+                            pointRadius: 0,
+                            borderWidth: 2,
+                            tension: 0.3
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { display: true, labels: { boxWidth: 12, font: { size: 10 } } },
+                        tooltip: { callbacks: { title: ctx => ctx[0].label + ' км' } }
+                    },
+                    scales: {
+                        x: { display: true, title: { display: true, text: 'Дистанция (км)', font: { size: 10 } }, ticks: { maxTicksLimit: 6 } },
+                        y: { type: 'linear', display: true, position: 'left', title: { display: true, text: 'Глубина', font: { size: 10 } }, reverse: true, min: 0 },
+                        y1: { type: 'linear', display: true, position: 'right', title: { display: true, text: 'Волны', font: { size: 10 } }, min: 0, grid: { drawOnChartArea: false } }
+                    }
+                }
+            });
+        }
 
         const inputs = {
             startLat: document.getElementById('start-lat'),
@@ -483,6 +550,7 @@
                     vessel_length: document.getElementById('vessel-length').value ? parseFloat(document.getElementById('vessel-length').value) : null,
                     vessel_width: document.getElementById('vessel-width').value ? parseFloat(document.getElementById('vessel-width').value) : null,
                     average_speed: speedVal ? parseFloat(speedVal) : null,
+                    max_wave_height: document.getElementById('max-wave-height').value ? parseFloat(document.getElementById('max-wave-height').value) : null,
                     forbidden_chokepoints: forbiddenCPs,
                     avoid_seca: document.getElementById('avoid-seca').checked,
                     calc_seca: document.getElementById('calc-seca').checked
@@ -618,6 +686,16 @@ else:
                         } else {
                             markers.end = L.marker([props.actual_end_lonlat[1], props.actual_end_lonlat[0]]).addTo(map).bindPopup("Финиш").openPopup();
                         }
+                    }
+                    
+                    // Отрисовка графиков телеметрии
+                    const segments = props.segments || {};
+                    const chartWrapper = document.getElementById('chart-wrapper');
+                    if (segments.depths_m && segments.waves_m && segments.depths_m.length > 0) {
+                        chartWrapper.style.display = 'block';
+                        renderTelemetryChart(segments);
+                    } else {
+                        chartWrapper.style.display = 'none';
                     }
                     
                     document.getElementById('script-container').classList.add('active');
