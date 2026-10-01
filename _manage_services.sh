@@ -111,15 +111,18 @@ action_logs() {
 action_exec() {
     local service=$1
     echo -e "\n${CYAN}💻 Подключение к '${service}' (Ctrl+D или exit для выхода)${NC}"
-    if ! sudo docker exec -it "$service" /bin/bash; then
-        sudo docker exec -it "$service" /bin/sh || echo -e "${RED}❌ Не удалось подключиться.${NC}"
+    # Используем 'docker compose exec' вместо 'docker exec', чтобы Docker сам нашел нужный контейнер по имени сервиса
+    if ! sudo HOST_NODE_NAME="$HOST_NODE_NAME" docker compose exec "$service" /bin/bash; then
+        sudo HOST_NODE_NAME="$HOST_NODE_NAME" docker compose exec "$service" /bin/sh || echo -e "${RED}❌ Не удалось подключиться.${NC}"
     fi
 }
 
 # --- НОВАЯ ФУНКЦИЯ: Мониторинг TMPFS ---
 get_tmpfs_stats() {
     local service=$1
-    local container_name=$service # Обычно имя контейнера совпадает с сервисом, если не задано иное
+    # Получаем ID контейнера через docker compose, чтобы обойти жесткую привязку к container_name в yml
+    local container_id=$(sudo HOST_NODE_NAME="$HOST_NODE_NAME" docker compose ps -q "$service" 2>/dev/null)
+    local container_name=${container_id:-$service}
     
     # Проверяем, запущен ли контейнер
     if [ "$(sudo docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null)" != "true" ]; then

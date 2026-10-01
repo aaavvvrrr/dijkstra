@@ -36,6 +36,11 @@ except Exception as e:
     traceback.print_exc()
     router_instance = None
 
+class AutotestSaveRequest(BaseModel):
+    test_name: str
+    request_payload: dict
+    expected_geojson: dict
+
 class RouteRequest(BaseModel):
     start_lon: Optional[float] = Field(default=None, description="Долгота старта")
     start_lat: Optional[float] = Field(default=None, description="Широта старта")
@@ -53,6 +58,7 @@ class RouteRequest(BaseModel):
     average_speed: Optional[float] = Field(default=None, description="Заданная средняя скорость судна (узлы)")
     avoid_seca: bool = Field(default=False, description="Минимизировать движение по SECA")
     calc_seca: bool = Field(default=False, description="Считать дистанцию по SECA")
+    timeout_seconds: Optional[int] = Field(default=None, description="Максимальное время поиска (сек)")
 
 
 import csv
@@ -98,10 +104,14 @@ async def calculate_route_api(req: RouteRequest):
         raise HTTPException(status_code=400, detail=str(e))
         
     try:
+        req_dump = req.model_dump()
+        if not req_dump.get("timeout_seconds"):
+            req_dump["timeout_seconds"] = APP_CONFIG.get("routing", {}).get("timeout_seconds", 60)
+            
         result = await router_instance.find_route(
             (start_lon, start_lat),
             (end_lon, end_lat),
-            request_params=req.model_dump()
+            request_params=req_dump
         )
         if not result:
             raise HTTPException(status_code=404, detail="Маршрут не найден")
@@ -116,6 +126,26 @@ def get_chokepoints_config():
     if not router_instance or not router_instance.cp_config:
         return {}
     return router_instance.cp_config
+
+@app.post("/api/autotests/save")
+def save_autotest(req: AutotestSaveRequest):
+    tests_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tests", "cases"))
+    os.makedirs(tests_dir, exist_ok=True)
+    
+    # Санитизация имени файла
+    safe_name = "".join([c if c.isalnum() else "_" for c in req.test_name]).strip("_")
+    if not safe_name: safe_name = "unnamed_test"
+    
+    filepath = os.path.join(tests_dir, f"{safe_name}.json")
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump({
+            "name": req.test_name,
+            "payload": req.request_payload,
+            "expected_geojson": req.expected_geojson
+        }, f, ensure_ascii=False, indent=2)
+        
+    return {"status": "success", "message": f"Тест '{safe_name}' успешно сохранен в папку tests/cases"}
 
 # =======================================================
 # API ОТЛАДКИ РАСТРА
@@ -178,6 +208,10 @@ async def websocket_route(websocket: WebSocket):
     try:
         msg = await websocket.receive_json()
         if msg.get("action") == "start":
+            # Подмешиваем глобальный таймаут из конфига, если не передан свой
+            if "timeout_seconds" not in msg or not msg["timeout_seconds"]:
+                msg["timeout_seconds"] = APP_CONFIG.get("routing", {}).get("timeout_seconds", 60)
+                
             listener_task = asyncio.create_task(listen_for_cancel())
             try:
                 slon, slat = resolve_coords(msg.get("start_lon"), msg.get("start_lat"), msg.get("start_unlocode"))
@@ -192,6 +226,8 @@ async def websocket_route(websocket: WebSocket):
                 )
                 if result:
                     await websocket.send_json({"type": "result", "geojson": result.to_geojson(request_params=msg)})
+            except TimeoutError as e:
+                await websocket.send_json({"type": "error", "message": str(e)})
             except InterruptedError as e:
                 await websocket.send_json({"type": "info", "message": str(e)})
             except ValueError as e:

@@ -38,6 +38,7 @@
             padding: 24px;
             box-shadow: 4px 0 15px rgba(0,0,0,0.03);
             z-index: 1000;
+            overflow: auto;
         }
 
         .header h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
@@ -152,6 +153,7 @@
             overflow-x: auto;
             white-space: pre-wrap;
             display: none;
+            max-height: 256px;
         }
         .script-panel.active { display: block; }
         .script-header {
@@ -256,6 +258,8 @@
                 <span class="stat-value" id="res-time-pess">0 ч</span>
             </div>
             
+            <button class="btn" id="save-test-btn" style="margin-top: 16px; background: #10b981; display: none;">💾 Сохранить как автотест</button>
+
             <div id="script-container" class="script-panel">
                 <div class="script-header">
                     <span>Python API Скрипт</span>
@@ -274,9 +278,9 @@
         // Инициализация карты
         const map = L.map('map').setView([45.0, 10.0], 4);
 
-        // Базовая подложка
-        const baseMap = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-            attribution: '&copy; CARTO'
+        // Базовая подложка (OpenStreetMap)
+        const baseMap = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }).addTo(map);
 
         // Подключаем наши динамические растры из FastAPI Tile Server
@@ -354,6 +358,9 @@
         let routeLayer = null;
         let progressPolyline = null; // Слой для "щупальца"
         let ws = null;
+        
+        let lastPayload = null;
+        let lastGeojson = null;
 
         const inputs = {
             startLat: document.getElementById('start-lat'),
@@ -463,6 +470,7 @@
                 document.getElementById('res-time-mean').innerText = '-';
                 document.getElementById('res-time-pess').innerText = '-';
                 resultsPanel.classList.add('active');
+                document.getElementById('save-test-btn').style.display = 'none';
 
                 const draftVal = document.getElementById('vessel-draft').value;
                 const speedVal = document.getElementById('vessel-speed').value;
@@ -491,6 +499,8 @@
                 if (inputs.startUnlocode.value) requestPayload.start_unlocode = inputs.startUnlocode.value;
                 if (inputs.endUnlocode.value) requestPayload.end_unlocode = inputs.endUnlocode.value;
 
+                lastPayload = requestPayload;
+
                 // Отправляем старт
                 ws.send(JSON.stringify(requestPayload));
 
@@ -507,17 +517,46 @@
                     
                 const pyScript = `import requests
 import json
+import os
 
 url = "${scriptHost}/api/route"
 payload = ${payloadStr}
+expected_file = "expected_route.json"
 
 response = requests.post(url, json=payload)
 if response.status_code == 200:
-    with open("route.geojson", "w", encoding="utf-8") as f:
-        json.dump(response.json(), f, ensure_ascii=False, indent=2)
-    print("Маршрут успешно сохранен в route.geojson")
+    result = response.json()
+    props = result.get("properties", {})
+    
+    if not os.path.exists(expected_file):
+        with open(expected_file, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        print(f"✅ Эталонный маршрут сохранен в {expected_file}")
+        print("При следующем запуске скрипта этот файл будет использован для проверки.")
+    else:
+        with open(expected_file, "r", encoding="utf-8") as f:
+            expected = json.load(f)
+        
+        exp_props = expected.get("properties", {})
+        
+        # Нечеткое сравнение (допуск 5%)
+        dist = props.get("distance_total_km", 0)
+        exp_dist = exp_props.get("distance_total_km", 0)
+        dist_diff = abs(dist - exp_dist) / max(exp_dist, 1)
+        
+        time_val = props.get("time_total_hours", 0)
+        exp_time = exp_props.get("time_total_hours", 0)
+        time_diff = abs(time_val - exp_time) / max(exp_time, 1)
+        
+        print(f"Дистанция: {dist:.2f} км (Эталон: {exp_dist:.2f} км) | Разница: {dist_diff:.1%}")
+        print(f"Время: {time_val:.2f} ч (Эталон: {exp_time:.2f} ч) | Разница: {time_diff:.1%}")
+        
+        if dist_diff <= 0.05 and time_diff <= 0.05:
+            print("✅ ТЕСТ ПРОЙДЕН! Отклонения в пределах нормы.")
+        else:
+            print("❌ ТЕСТ ПРОВАЛЕН! Слишком большое отклонение.")
 else:
-    print("Ошибка:", response.status_code, response.text)
+    print("Ошибка API:", response.status_code, response.text)
 `;
                 document.getElementById('script-code').innerText = pyScript;
             };
@@ -542,6 +581,9 @@ else:
                     if (progressPolyline) { map.removeLayer(progressPolyline); progressPolyline = null; }
                     
                     const geojson = data.geojson;
+                    lastGeojson = geojson;
+                    document.getElementById('save-test-btn').style.display = 'block';
+
                     routeLayer = L.geoJSON(geojson, {
                         style: { color: '#2563eb', weight: 5, opacity: 0.9, dashArray: '8, 8' }
                     }).addTo(map);
@@ -599,6 +641,26 @@ else:
                 const hasEnd = coords.end || inputs.endUnlocode.value;
                 currentStep = (hasStart && hasEnd) ? 'ready' : currentStep;
             };
+        });
+
+        // Обработчик кнопки сохранения автотеста
+        document.getElementById('save-test-btn').addEventListener('click', () => {
+            if (!lastPayload || !lastGeojson) return;
+            const testName = prompt("Введите короткое название для теста (например: 'spb_to_mumbai_no_suez'):", "route_test");
+            if (!testName) return;
+            
+            fetch('/api/autotests/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    test_name: testName,
+                    request_payload: lastPayload,
+                    expected_geojson: lastGeojson
+                })
+            })
+            .then(res => res.json())
+            .then(data => alert(data.message || "Тест сохранен!"))
+            .catch(err => alert("Ошибка сохранения: " + err));
         });
     </script>
 </body>

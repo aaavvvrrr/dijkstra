@@ -84,6 +84,7 @@ class SphericalRasterRouter:
 
         self.cp_raster = None
         self.cp_config = {}
+        self.cp_coarse_map = {}
         if os.path.exists(cp_tif_path):
             print(f"Загрузка растра узких мест: {cp_tif_path} ...")
             with rasterio.open(cp_tif_path) as src:
@@ -134,6 +135,13 @@ class SphericalRasterRouter:
         counts = np.bincount(self.components.ravel())
         self.main_ocean_id = np.argmax(counts[1:]) + 1 if len(counts) > 1 else 0
         print(f"Найдено {self.num_features} изолированных водоемов. Главный океан: ID {self.main_ocean_id}")
+
+        if self.cp_raster is not None:
+            unique_cps = np.unique(self.cp_raster)
+            for cp_id in unique_cps:
+                if cp_id == 0: continue
+                rr, cc = np.where(self.cp_raster == cp_id)
+                self.cp_coarse_map[cp_id] = set(zip(rr // self.scale, cc // self.scale))
 
         self.coarse_dy = self.dy_km * self.scale
         c_lats = np.array([self.max_lat - r * self.d_lat * self.scale for r in range(self.coarse_rows)])
@@ -231,7 +239,7 @@ class SphericalRasterRouter:
                         queue.append((nr, nc))
         return None
 
-    def _build_coarse_heuristic(self, goal_r: int, goal_c: int, comp_id: int) -> np.ndarray:
+    def _build_coarse_heuristic(self, goal_r: int, goal_c: int, comp_id: int, forbidden_cp: set) -> np.ndarray:
         c_gr, c_gc = goal_r // self.scale, goal_c // self.scale
         
         # ИСПРАВЛЕНИЕ: Меняем dtype на np.float64, чтобы избежать конфликта точности с Python float!
@@ -245,6 +253,12 @@ class SphericalRasterRouter:
         c_rows, c_cols = self.coarse_rows, self.coarse_cols
         max_s = self.max_speed
         
+        blocked_coarse = set()
+        if forbidden_cp:
+            for cp_id in forbidden_cp:
+                if cp_id in self.cp_coarse_map:
+                    blocked_coarse.update(self.cp_coarse_map[cp_id])
+        
         while pq:
             t, r, c = heapq.heappop(pq)
             if t > coarse_h[r, c]: continue
@@ -254,6 +268,7 @@ class SphericalRasterRouter:
             for dr, dc, dist in [(-1, 0, c_dy), (1, 0, c_dy), (0, -1, dx), (0, 1, dx), (-1, -1, diag), (-1, 1, diag), (1, -1, diag), (1, 1, diag)]:
                 nr, nc = r + dr, c + dc
                 if 0 <= nr < c_rows and 0 <= nc < c_cols:
+                    if (nr, nc) in blocked_coarse: continue
                     if self.components[nr, nc] == comp_id:
                         nt = t + (dist / max_s)
                         if nt < coarse_h[nr, nc]:
@@ -294,22 +309,6 @@ class SphericalRasterRouter:
                 f"(ID {start_comp} и ID {goal_comp}). Включите слой 'Отладка: Связность морей' на карте, чтобы увидеть разрыв."
             )
 
-        coarse_h = self._build_coarse_heuristic(gr, gc, goal_comp)
-        if coarse_h[sr // self.scale, sc // self.scale] == np.inf:
-            raise ValueError("Ошибка иерархической сетки: внутренний разрыв.")
-
-        cols = self.cols
-        start_idx = sr * cols + sc
-        goal_idx = gr * cols + gc
-
-        pq = [(0.0, 0.0, sr, sc)]
-        costs_to_reach = {start_idx: 0.0}
-        came_from = {start_idx: -1}
-        
-        avoid_seca = request_params.get("avoid_seca", False)
-        calc_seca = request_params.get("calc_seca", False)
-        min_depth = (vessel_draft + 2.0) if vessel_draft else None
-
         forbidden_cp = set(request_params.get("forbidden_chokepoints", []))
         v_len = request_params.get("vessel_length")
         v_wid = request_params.get("vessel_width")
@@ -324,8 +323,28 @@ class SphericalRasterRouter:
                 elif vessel_draft and cp_data.get("max_draft") and vessel_draft > cp_data["max_draft"]:
                     forbidden_cp.add(cp_id)
 
+        coarse_h = self._build_coarse_heuristic(gr, gc, goal_comp, forbidden_cp)
+        if coarse_h[sr // self.scale, sc // self.scale] == np.inf:
+            raise ValueError("Ошибка иерархической сетки: внутренний разрыв. Возможно, из-за габаритов судна перекрыты все доступные пути.")
+
+        cols = self.cols
+        start_idx = sr * cols + sc
+        goal_idx = gr * cols + gc
+
+        pq = [(0.0, 0.0, sr, sc)]
+        costs_to_reach = {start_idx: 0.0}
+        came_from = {start_idx: -1}
+        
+        avoid_seca = request_params.get("avoid_seca", False)
+        calc_seca = request_params.get("calc_seca", False)
+        min_depth = (vessel_draft + 2.0) if vessel_draft else None
+
         custom_speed_knots = request_params.get("average_speed")
         custom_speed_kmh = custom_speed_knots * KNOT_TO_KMH if custom_speed_knots else None
+        
+        max_timeout = request_params.get("timeout_seconds")
+        if not max_timeout:
+            max_timeout = 60
 
         speed_raster = req_speed_raster
         dx_per_row = self.dx_per_row
@@ -348,6 +367,8 @@ class SphericalRasterRouter:
             nodes_explored += 1
             
             if nodes_explored % 30000 == 0:
+                if time.time() - t_start > max_timeout:
+                    raise TimeoutError(f"Превышено максимальное время расчета ({max_timeout} сек). Сложная конфигурация узких мест.")
                 if check_cancel_callback and check_cancel_callback(): raise InterruptedError("Поиск прерван.")
                 if progress_callback:
                     fast_path = []
