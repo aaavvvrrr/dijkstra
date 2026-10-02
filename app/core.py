@@ -7,7 +7,7 @@ import asyncio
 from collections import deque
 import numpy as np
 import rasterio
-from scipy.ndimage import label
+from scipy.ndimage import label, distance_transform_edt
 from typing import Tuple, List, Optional, Dict, Any, Callable
 from dataclasses import dataclass
 from shapely.geometry import LineString
@@ -243,7 +243,7 @@ class SphericalRasterRouter:
                         queue.append((nr, nc))
         return None
 
-    def _build_coarse_heuristic(self, goal_r: int, goal_c: int, comp_id: int, forbidden_cp: set) -> np.ndarray:
+    def _build_coarse_heuristic(self, goal_r: int, goal_c: int, comp_id: int, forbidden_cp: set, manual_storms_px: list = None) -> np.ndarray:
         c_gr, c_gc = goal_r // self.scale, goal_c // self.scale
         
         # ИСПРАВЛЕНИЕ: Меняем dtype на np.float64, чтобы избежать конфликта точности с Python float!
@@ -273,6 +273,20 @@ class SphericalRasterRouter:
                 nr, nc = r + dr, c + dc
                 if 0 <= nr < c_rows and 0 <= nc < c_cols:
                     if (nr, nc) in blocked_coarse: continue
+                    
+                    if manual_storms_px:
+                        in_storm = False
+                        dense_r = nr * self.scale + self.scale // 2
+                        dense_c = nc * self.scale + self.scale // 2
+                        dense_dx = dx / self.scale
+                        for s_r, s_c, s_rad_sq in manual_storms_px:
+                            dr_km = (dense_r - s_r) * c_dy
+                            dc_km = (dense_c - s_c) * dense_dx
+                            if dr_km*dr_km + dc_km*dc_km <= s_rad_sq:
+                                in_storm = True
+                                break
+                        if in_storm: continue
+                        
                     if self.components[nr, nc] == comp_id:
                         nt = t + (dist / max_s)
                         if nt < coarse_h[nr, nc]:
@@ -327,9 +341,33 @@ class SphericalRasterRouter:
                 elif vessel_draft and cp_data.get("max_draft") and vessel_draft > cp_data["max_draft"]:
                     forbidden_cp.add(cp_id)
 
-        coarse_h = self._build_coarse_heuristic(gr, gc, goal_comp, forbidden_cp)
+        manual_storms = request_params.get("manual_storms", [])
+        manual_storms_px = []
+        for st in manual_storms:
+            st_r, st_c = self._coord_to_index(st["lon"], st["lat"])
+            rad_sq = st.get("radius_km", 300.0) ** 2
+            manual_storms_px.append((st_r, st_c, rad_sq))
+
+        coarse_h = self._build_coarse_heuristic(gr, gc, goal_comp, forbidden_cp, manual_storms_px)
         if coarse_h[sr // self.scale, sc // self.scale] == np.inf:
             raise ValueError("Ошибка иерархической сетки: внутренний разрыв. Возможно, из-за габаритов судна перекрыты все доступные пути.")
+            
+        # Rubber-Banding: Подготовка гравитационного поля базового маршрута
+        rubber_band_weight = request_params.get("rubber_band_weight", 0.0)
+        reference_route = request_params.get("reference_route", [])
+        dist_grid = None
+
+        if reference_route and rubber_band_weight > 0:
+            ref_mask = np.ones((self.coarse_rows, self.coarse_cols), dtype=bool)
+            for lon, lat in reference_route:
+                rr, cc = self._coord_to_index(lon, lat)
+                cr_c, cc_c = rr // self.scale, cc // self.scale
+                if 0 <= cr_c < self.coarse_rows and 0 <= cc_c < self.coarse_cols:
+                    ref_mask[cr_c, cc_c] = False
+            
+            # Если переданы валидные точки, строим Distance Transform (O(N) для 2D массива, ~2мс)
+            if not ref_mask.all():
+                dist_grid = distance_transform_edt(ref_mask)
 
         cols = self.cols
         start_idx = sr * cols + sc
@@ -433,6 +471,17 @@ class SphericalRasterRouter:
                         # Если значение валидное (меньше 100м) и превышает лимит судна - обходим стороной
                         if w_val < 100.0 and w_val > max_wave_height:
                             continue
+                            
+                # O(1) Проверка искусственных зон циклонов
+                if manual_storms_px:
+                    in_storm = False
+                    for s_r, s_c, s_rad_sq in manual_storms_px:
+                        dr_km = (nr - s_r) * dy_km
+                        dc_km = (nc - s_c) * dx_per_row[nr]
+                        if dr_km*dr_km + dc_km*dc_km <= s_rad_sq:
+                            in_storm = True
+                            break
+                    if in_storm: continue
                 
                 cr_c, cc_c = nr // self.scale, nc // self.scale
                 if cr_c >= self.coarse_rows or cc_c >= self.coarse_cols: continue
@@ -458,6 +507,11 @@ class SphericalRasterRouter:
 
                     # h_time - это эвристика времени. Умножение на 1.2 делает Weighted A*
                     f_score = new_cost + 1.2 * h_time
+                    
+                    # Притягиваем алгоритм к базовому маршруту, если он задан
+                    if dist_grid is not None:
+                        f_score += dist_grid[cr_c, cc_c] * rubber_band_weight
+                        
                     heapq.heappush(pq, (f_score, new_cost, nr, nc))
 
         return None

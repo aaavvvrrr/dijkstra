@@ -61,6 +61,10 @@ class RouteRequest(BaseModel):
     avoid_seca: bool = Field(default=False, description="Минимизировать движение по SECA")
     calc_seca: bool = Field(default=False, description="Считать дистанцию по SECA")
     timeout_seconds: Optional[int] = Field(default=None, description="Максимальное время поиска (сек)")
+    
+    reference_route: Optional[list[list[float]]] = Field(default=None, description="Оригинальный маршрут для корректировки [[lon, lat], ...]")
+    rubber_band_weight: Optional[float] = Field(default=0.0, description="Сила притяжения к оригинальному маршруту")
+    manual_storms: Optional[list[dict]] = Field(default_factory=list, description="Ручные зоны циклонов для отладки [{lat, lon, radius_km}]")
 
 
 import csv

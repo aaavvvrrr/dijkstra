@@ -29,7 +29,12 @@ def run_tests():
         payload = test_data.get("payload", {})
         expected_geojson = test_data.get("expected_geojson", {})
         
-        print(f"⏳ Тест: {test_name} ...", end="", flush=True)
+        tags = []
+        if payload.get("manual_storms"): tags.append("🌪️ Шторм")
+        if payload.get("reference_route") and payload.get("rubber_band_weight", 0) > 0: tags.append("📌 Притяжение")
+        tag_str = f" [{' | '.join(tags)}]" if tags else ""
+        
+        print(f"⏳ Тест: {test_name}{tag_str} ...", end="", flush=True)
         
         t0 = time.time()
         try:

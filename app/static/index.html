@@ -219,6 +219,15 @@
         </div>
 
         <div class="control-group">
+            <label>Отладка: Искусственные циклоны</label>
+            <div style="display: flex; gap: 8px;">
+                <button class="btn" id="add-storm-btn" style="background: #ef4444; color: white;">+ Нарисовать циклон</button>
+                <button class="btn" id="clear-storm-btn" style="background: #64748b; color: white; display: none;">Очистить</button>
+            </div>
+            <span class="instruction" id="storm-instruction" style="display: none; color: #ef4444; font-weight: bold;">Кликните на карту, чтобы разместить шторм</span>
+        </div>
+
+        <div class="control-group">
             <label>Дополнительные опции</label>
             <label class="checkbox-label">
                 <input type="checkbox" id="avoid-seca"> Минимизировать проход по зонах SECA
@@ -226,6 +235,11 @@
             <label class="checkbox-label">
                 <input type="checkbox" id="calc-seca"> Рассчитать расстояние в зонах SECA
             </label>
+            <div style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px;">
+                <label>Притяжение к базовому маршруту</label>
+                <input type="range" id="rubber-band-weight" min="0" max="10" step="0.5" value="0" style="width: 100%;">
+                <span class="instruction">0 - Строить глобально, 10 - Максимально держаться базы</span>
+            </div>
         </div>
 
         <div style="display: flex; gap: 8px;">
@@ -269,6 +283,7 @@
             </div>
 
             <button class="btn" id="save-test-btn" style="margin-top: 16px; background: #10b981; display: none;">💾 Сохранить как автотест</button>
+            <button class="btn" id="set-ref-btn" style="margin-top: 8px; background: #8b5cf6; display: none;">📌 Зафиксировать как базовый</button>
 
             <div id="script-container" class="script-panel">
                 <div class="script-header">
@@ -372,6 +387,38 @@
         let lastPayload = null;
         let lastGeojson = null;
         let telemetryChart = null;
+        
+        let referenceRouteCoords = null;
+        let referenceRouteLayer = null;
+        
+        let manualStorms = [];
+        let stormLayers = L.layerGroup().addTo(map);
+        let isPlacingStorm = false;
+
+        document.getElementById('add-storm-btn').addEventListener('click', () => {
+            isPlacingStorm = true;
+            document.getElementById('storm-instruction').style.display = 'block';
+            map.getContainer().style.cursor = 'crosshair';
+        });
+
+        document.getElementById('clear-storm-btn').addEventListener('click', () => {
+            manualStorms = [];
+            stormLayers.clearLayers();
+            document.getElementById('clear-storm-btn').style.display = 'none';
+        });
+
+        document.getElementById('set-ref-btn').addEventListener('click', () => {
+            if (!lastGeojson) return;
+            referenceRouteCoords = lastGeojson.geometry.coordinates;
+            
+            if (referenceRouteLayer) map.removeLayer(referenceRouteLayer);
+            referenceRouteLayer = L.geoJSON(lastGeojson, {
+                style: { color: '#64748b', weight: 6, opacity: 0.5 } // Серая толстая линия-подложка
+            }).addTo(map);
+            
+            document.getElementById('rubber-band-weight').value = 5.0; // Включаем притяжение
+            alert('Маршрут зафиксирован! Задайте ограничение "Макс. волна", чтобы увидеть, как алгоритм обогнет циклон и вернется на эту серую траекторию.');
+        });
 
         function renderTelemetryChart(segments) {
             const ctx = document.getElementById('telemetry-chart').getContext('2d');
@@ -456,6 +503,25 @@
             let lng = e.latlng.lng;
             while (lng > 180) lng -= 360;
             while (lng < -180) lng += 360;
+
+            if (isPlacingStorm) {
+                const stormRadiusKm = 300; // Радиус 300 км для демо
+                manualStorms.push({ lat: e.latlng.lat, lon: lng, radius_km: stormRadiusKm });
+                
+                L.circle([e.latlng.lat, lng], { 
+                    radius: stormRadiusKm * 1000, 
+                    color: '#ef4444', 
+                    fillColor: '#ef4444', 
+                    fillOpacity: 0.4,
+                    weight: 2
+                }).addTo(stormLayers);
+                
+                isPlacingStorm = false;
+                document.getElementById('storm-instruction').style.display = 'none';
+                document.getElementById('clear-storm-btn').style.display = 'block';
+                map.getContainer().style.cursor = '';
+                return; // Прерываем обычную логику установки точек маршрута
+            }
 
             const lat = Math.max(-90, Math.min(90, e.latlng.lat)).toFixed(4);
             const lon = lng.toFixed(4);
@@ -553,7 +619,10 @@
                     max_wave_height: document.getElementById('max-wave-height').value ? parseFloat(document.getElementById('max-wave-height').value) : null,
                     forbidden_chokepoints: forbiddenCPs,
                     avoid_seca: document.getElementById('avoid-seca').checked,
-                    calc_seca: document.getElementById('calc-seca').checked
+                    calc_seca: document.getElementById('calc-seca').checked,
+                    rubber_band_weight: parseFloat(document.getElementById('rubber-band-weight').value),
+                    reference_route: referenceRouteCoords,
+                    manual_storms: manualStorms
                 };
 
                 if (coords.start) {
@@ -583,11 +652,19 @@
                     .replace(/: false/g, ': False')
                     .replace(/: true/g, ': True');
                     
+                let featureComments = "";
+                if (pyPayload.manual_storms && pyPayload.manual_storms.length > 0) {
+                    featureComments += "# 🌪️ ВНИМАНИЕ: Тест включает искусственные штормы (обход циклонов)!\n";
+                }
+                if (pyPayload.reference_route && pyPayload.rubber_band_weight > 0) {
+                    featureComments += "# 📌 ВНИМАНИЕ: Включен режим Rubber-Banding (притяжение к базовому маршруту)!\n";
+                }
+
                 const pyScript = `import requests
 import json
 import os
 
-url = "${scriptHost}/api/route"
+${featureComments}url = "${scriptHost}/api/route"
 payload = ${payloadStr}
 expected_file = "expected_route.json"
 
@@ -698,6 +775,7 @@ else:
                         chartWrapper.style.display = 'none';
                     }
                     
+                    document.getElementById('set-ref-btn').style.display = 'block';
                     document.getElementById('script-container').classList.add('active');
                     ws.close();
                 } 
@@ -724,7 +802,12 @@ else:
         // Обработчик кнопки сохранения автотеста
         document.getElementById('save-test-btn').addEventListener('click', () => {
             if (!lastPayload || !lastGeojson) return;
-            const testName = prompt("Введите короткое название для теста (например: 'spb_to_mumbai_no_suez'):", "route_test");
+            
+            let suggestedName = "route_test";
+            if (lastPayload.manual_storms && lastPayload.manual_storms.length > 0) suggestedName += "_with_storm";
+            if (lastPayload.reference_route && lastPayload.rubber_band_weight > 0) suggestedName += "_rubberband";
+            
+            const testName = prompt("Введите короткое название для теста:", suggestedName);
             if (!testName) return;
             
             fetch('/api/autotests/save', {
