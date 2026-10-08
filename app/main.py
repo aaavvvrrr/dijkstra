@@ -12,6 +12,7 @@ from typing import Optional
 from PIL import Image
 import numpy as np
 from datetime import datetime
+import matplotlib.cm as cm
 
 from rio_tiler.io import Reader
 from rio_tiler.colormap import cmap
@@ -29,13 +30,33 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as f:
 STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", APP_CONFIG["paths"]["static_dir"]))
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", APP_CONFIG["paths"]["processed_dir"]))
 
-try:
-    router_instance = SphericalRasterRouter(data_dir=DATA_DIR)
-except Exception as e:
-    import traceback
-    print("❌ КРИТИЧЕСКАЯ ОШИБКА ИНИЦИАЛИЗАЦИИ БЭКЕНДА:")
-    traceback.print_exc()
-    router_instance = None
+router_instance = None
+SERVER_STATUS = {"status": "starting", "message": "Запуск FastAPI и подготовка окружения..."}
+
+def _update_status(msg: str):
+    SERVER_STATUS["message"] = msg
+
+async def init_router_task():
+    global router_instance, SERVER_STATUS
+    try:
+        loop = asyncio.get_running_loop()
+        SERVER_STATUS["message"] = "Ожидание инициализации ядра..."
+        # Запускаем тяжелый конструктор в отдельном потоке, чтобы API отвечал мгновенно
+        router_instance = await loop.run_in_executor(None, lambda: SphericalRasterRouter(DATA_DIR, status_callback=_update_status))
+        SERVER_STATUS = {"status": "ready", "message": "Сервер готов к работе"}
+        print("✅ Бэкенд успешно инициализирован в фоне.")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        SERVER_STATUS = {"status": "error", "message": f"Ошибка: {str(e)}"}
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(init_router_task())
+
+@app.get("/api/status")
+def get_server_status():
+    return SERVER_STATUS
 
 class AutotestSaveRequest(BaseModel):
     test_name: str
@@ -100,6 +121,8 @@ def resolve_coords(lon: Optional[float], lat: Optional[float], unlocode: Optiona
 # =======================================================
 @app.post("/api/route")
 async def calculate_route_api(req: RouteRequest):
+    if SERVER_STATUS["status"] == "starting":
+        raise HTTPException(status_code=503, detail="Сервер загружается, подождите...")
     if not router_instance:
         raise HTTPException(status_code=500, detail="Бэкенд не инициализирован")
     
@@ -230,6 +253,10 @@ def get_coarse_grid_png():
 @app.websocket("/api/ws/route")
 async def websocket_route(websocket: WebSocket):
     await websocket.accept()
+    if SERVER_STATUS["status"] == "starting":
+        await websocket.send_json({"type": "error", "message": "Сервер загружается. Пожалуйста, подождите..."})
+        await websocket.close()
+        return
     if not router_instance:
         await websocket.send_json({"type": "error", "message": "Бэкенд не инициализирован"})
         await websocket.close()
@@ -292,7 +319,6 @@ async def websocket_route(websocket: WebSocket):
 # Замените эндпоинт get_tile на этот код:
 @app.get("/tiles/{layer}/{z}/{x}/{y}.png")
 def get_tile(layer: str, z: int, x: int, y: int, draft: Optional[float] = None, max_wave: Optional[float] = None):
-    # Выбираем правильный файл
     if layer == "speed":
         filepath = os.path.join(DATA_DIR, "eff_vel_all.tif")
     elif layer == "sd":
@@ -304,7 +330,6 @@ def get_tile(layer: str, z: int, x: int, y: int, draft: Optional[float] = None, 
     elif layer == "chokepoints":
         filepath = os.path.join(DATA_DIR, "chokepoints.tif")
     elif layer in ("waves", "waves_impassable"):
-        # Берем путь к волнению прямо из конфига
         wave_path = APP_CONFIG["waves"]["output_file"]
         filepath = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", wave_path))
     elif layer == "debug":
@@ -317,46 +342,73 @@ def get_tile(layer: str, z: int, x: int, y: int, draft: Optional[float] = None, 
 
     try:
         with Reader(filepath) as src:
-            # rio-tiler требует параметр indexes=1 для выбора первого слоя (канала).
-            # Для глубины используем нативный nodata (-32768), для остальных - 0 (суша/нет данных)
-            if layer in ("depth", "depth_impassable"):
+            if layer in ("depth", "depth_impassable", "waves", "waves_impassable"):
+                # Для батиметрии и погоды сохраняем оригинальный nodata (-32768 или 9999)
                 img = src.tile(x, y, z, indexes=1)
             else:
                 img = src.tile(x, y, z, indexes=1, nodata=0)
             
             if layer == "debug":
-                # Кастомная раскраска: Мировой океан - синий, изолированные озера - красные
-                _cmap = {0: (0, 0, 0, 0)} # Суша прозрачная
+                _cmap = {0: (0, 0, 0, 0)}
                 for i in range(1, router_instance.num_features + 2):
                     if i == router_instance.main_ocean_id:
-                        _cmap[i] = (59, 130, 246, 180) # Синий
+                        _cmap[i] = (59, 130, 246, 180)
                     else:
-                        _cmap[i] = (239, 68, 68, 200)  # Красный
+                        _cmap[i] = (239, 68, 68, 200)
                 png_bytes = img.render(img_format="PNG", colormap=_cmap)
                 
             elif layer == "seca":
-                # Только зоны SECA (значение 1) - оранжевый полупрозрачный
                 _cmap = {1: (249, 115, 22, 150)}
                 png_bytes = img.render(img_format="PNG", colormap=_cmap)
                 
             elif layer == "chokepoints":
-                # Узкие места: закрашиваем все доступные ID фиолетовым цветом
                 _cmap = {i: (168, 85, 247, 200) for i in range(1, 1000)}
                 png_bytes = img.render(img_format="PNG", colormap=_cmap)
                 
             elif layer == "depth":
-                # Батиметрия: rescale от -1000 до 0. blues_r делает глубину темной
                 img.rescale(in_range=((-5000, 0),))
                 png_bytes = img.render(img_format="PNG", colormap=cmap.get("blues_r"))
                 
             elif layer == "depth_impassable":
                 if draft is None: return Response(status_code=204)
-                min_depth = draft + 2.0
-                # В GEBCO глубины отрицательные (напр. -15m). Ищем воду (data < 0) мельче лимита (data > -min_depth)
-                mask = (img.data > -min_depth) & (img.data < 0)
-                if mask.ndim == 3: mask = mask[0]  # Убираем измерение каналов (bands)
+                raw_data = np.ma.getdata(img.data)
+                if raw_data.ndim == 3: raw_data = raw_data[0]
                 
-                # Создаем RGBA холст (полностью прозрачный) и красим нужные пиксели в красный
+                # Ищем воду (data < 0) мельче лимита
+                mask = (raw_data > -(draft + 2.0)) & (raw_data < 0)
+                
+                rgba = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.uint8)
+                rgba[mask] = [239, 68, 68, 200] # Красная заливка
+                
+                buf = io.BytesIO()
+                Image.fromarray(rgba).save(buf, format="PNG")
+                png_bytes = buf.getvalue()
+
+            elif layer == "waves":
+                raw_data = np.ma.getdata(img.data)
+                if raw_data.ndim == 3: raw_data = raw_data[0]
+                
+                raw_mask = np.ma.getdata(img.mask) if hasattr(img, 'mask') else np.ones_like(raw_data)
+                if raw_mask.ndim == 3: raw_mask = raw_mask[0]
+                
+                # Валидные пиксели: там где нет суши (маска rio-tiler), нет ошибок (>100) и нет NaN
+                valid = (raw_mask > 0) & (raw_data < 100) & (~np.isnan(raw_data))
+                
+                norm_data = np.clip(raw_data / 10.0, 0, 1)
+                rgba = cm.viridis(norm_data, bytes=True)
+                rgba[~valid] = [0, 0, 0, 0] # Суша и лед становятся абсолютно прозрачными!
+                
+                buf = io.BytesIO()
+                Image.fromarray(rgba).save(buf, format="PNG")
+                png_bytes = buf.getvalue()
+                
+            elif layer == "waves_impassable":
+                if max_wave is None: return Response(status_code=204)
+                raw_data = np.ma.getdata(img.data)
+                if raw_data.ndim == 3: raw_data = raw_data[0]
+                
+                # Выделяем только штормы
+                mask = (raw_data > max_wave) & (raw_data < 100) & (~np.isnan(raw_data))
                 rgba = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.uint8)
                 rgba[mask] = [239, 68, 68, 200]
                 
@@ -364,30 +416,10 @@ def get_tile(layer: str, z: int, x: int, y: int, draft: Optional[float] = None, 
                 Image.fromarray(rgba).save(buf, format="PNG")
                 png_bytes = buf.getvalue()
 
-            elif layer == "waves":
-                # Волны (высота): от 0 до 10 метров. Палитра viridis (от синего к желтому)
-                img.rescale(in_range=((0, 10),))
-                png_bytes = img.render(img_format="PNG", colormap=cmap.get("viridis"))
-                
-            elif layer == "waves_impassable":
-                if max_wave is None: return Response(status_code=204)
-                mask = (img.data > max_wave) & (img.data < 100) # Игнорируем nodata (>100)
-                if mask.ndim == 3: mask = mask[0]
-                
-                # Создаем RGBA холст (полностью прозрачный) и красим нужные пиксели в красный
-                rgba = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.uint8)
-                rgba[mask] = [239, 68, 68, 200]
-                
-                buf = io.BytesIO()
-                Image.fromarray(rgba).save(buf, format="PNG")
-                png_bytes = buf.getvalue()
-                
             elif layer == "speed":
-                # turbo - от синего (медленно) к красному (быстро)
                 img.rescale(in_range=((0, 20),))
                 png_bytes = img.render(img_format="PNG", colormap=cmap.get("turbo"))
             else:
-                # plasma - от темно-фиолетового к желтому (высокая дисперсия)
                 img.rescale(in_range=((0, 5),))
                 png_bytes = img.render(img_format="PNG", colormap=cmap.get("plasma"))
                 

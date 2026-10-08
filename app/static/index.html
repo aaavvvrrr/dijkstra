@@ -188,6 +188,14 @@
 </head>
 <body>
 
+    <!-- Экран загрузки сервера -->
+    <div id="loading-overlay" style="position: fixed; inset: 0; background: rgba(15, 23, 42, 0.95); z-index: 9999; display: flex; flex-direction: column; justify-content: center; align-items: center; color: white; transition: opacity 0.5s ease;">
+        <div style="width: 48px; height: 48px; border: 4px solid #3b82f6; border-bottom-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 24px;"></div>
+        <h2 style="margin-bottom: 8px;">Движок маршрутизации запускается</h2>
+        <p id="loading-message" style="color: #94a3b8; font-size: 0.9rem;">Ожидание подключения к бэкенду...</p>
+        <style>@keyframes spin { 100% { transform: rotate(360deg); } }</style>
+    </div>
+
     <aside class="sidebar">
         <div class="header">
             <h1>Maritime Route Finder</h1>
@@ -357,6 +365,34 @@
     <!-- Leaflet JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
+        // Проверка статуса сервера
+        async function checkServerStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                const overlay = document.getElementById('loading-overlay');
+                const msgEl = document.getElementById('loading-message');
+                
+                if (data.status === 'starting') {
+                    overlay.style.display = 'flex';
+                    msgEl.innerText = data.message;
+                    setTimeout(checkServerStatus, 2000);
+                } else if (data.status === 'error') {
+                    overlay.style.display = 'flex';
+                    msgEl.innerText = "Ошибка: " + data.message;
+                    msgEl.style.color = "#ef4444";
+                } else {
+                    // Сервер готов, плавно скрываем лоадер
+                    overlay.style.opacity = '0';
+                    setTimeout(() => overlay.style.display = 'none', 500);
+                }
+            } catch (err) {
+                document.getElementById('loading-message').innerText = "Сервер недоступен, ожидание старта...";
+                setTimeout(checkServerStatus, 3000);
+            }
+        }
+        checkServerStatus();
+
         // Инициализация карты
         const map = L.map('map').setView([45.0, 10.0], 4);
 

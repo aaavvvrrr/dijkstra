@@ -62,27 +62,32 @@ class RouteResult:
         }
 
 class SphericalRasterRouter:
-    def __init__(self, data_dir: str):
+    def __init__(self, data_dir: str, status_callback: Optional[Callable[[str], None]] = None):
         self.data_dir = data_dir
         self.rasters_cache = {}
+        self.status_callback = status_callback
         
+        def log(msg):
+            print(msg)
+            if self.status_callback: self.status_callback(msg)
+            
         base_speed = os.path.join(data_dir, "eff_vel_all.tif")
         seca_tif_path = os.path.join(data_dir, "seca_mask.tif")
         depth_tif_path = os.path.join(data_dir, "depth_meters.tif")
         cp_tif_path = os.path.join(data_dir, "chokepoints.tif")
         cp_config_path = os.path.join(data_dir, "chokepoints_config.json")
 
-        print(f"Загрузка базового растра для инициализации сетки: {base_speed} ...")
+        log(f"Загрузка базового растра для инициализации сетки: {base_speed} ...")
         
         self.seca_raster = None
         if os.path.exists(seca_tif_path):
-            print(f"Загрузка маски SECA: {seca_tif_path} ...")
+            log(f"Загрузка маски SECA: {seca_tif_path} ...")
             with rasterio.open(seca_tif_path) as src:
                 self.seca_raster = src.read(1)
 
         self.depth_raster = None
         if os.path.exists(depth_tif_path):
-            print(f"Загрузка батиметрии (GEBCO): {depth_tif_path} ...")
+            log(f"Загрузка батиметрии (GEBCO): {depth_tif_path} ...")
             with rasterio.open(depth_tif_path) as src:
                 self.depth_raster = src.read(1).astype(np.int16)
 
@@ -90,7 +95,7 @@ class SphericalRasterRouter:
         self.cp_config = {}
         self.cp_coarse_map = {}
         if os.path.exists(cp_tif_path):
-            print(f"Загрузка растра узких мест: {cp_tif_path} ...")
+            log(f"Загрузка растра узких мест: {cp_tif_path} ...")
             with rasterio.open(cp_tif_path) as src:
                 self.cp_raster = src.read(1).astype(np.uint16)
         if os.path.exists(cp_config_path):
@@ -124,7 +129,7 @@ class SphericalRasterRouter:
         self.max_speed = float(np.max(self.speed_raster))
         if self.max_speed <= 0: self.max_speed = 30.0
 
-        print("Создание грубой сетки (масштаб 1:20)...")
+        log("Создание грубой сетки (масштаб 1:20)...")
         self.scale = 20
         self.coarse_rows = self.rows // self.scale
         self.coarse_cols = self.cols // self.scale
@@ -132,13 +137,13 @@ class SphericalRasterRouter:
         water_mask = self.speed_raster[:self.coarse_rows * self.scale, :self.coarse_cols * self.scale] > 0
         self.coarse_water = water_mask.reshape(self.coarse_rows, self.scale, self.coarse_cols, self.scale).any(axis=(1, 3))
 
-        print("Анализ связности (Connected Components)...")
+        log("Анализ связности (Connected Components)...")
         structure = np.ones((3, 3), dtype=int)
         self.components, self.num_features = label(self.coarse_water, structure=structure)
         
         counts = np.bincount(self.components.ravel())
         self.main_ocean_id = np.argmax(counts[1:]) + 1 if len(counts) > 1 else 0
-        print(f"Найдено {self.num_features} изолированных водоемов. Главный океан: ID {self.main_ocean_id}")
+        log(f"Найдено {self.num_features} изолированных водоемов. Главный океан: ID {self.main_ocean_id}")
 
         if self.cp_raster is not None:
             unique_cps = np.unique(self.cp_raster)
