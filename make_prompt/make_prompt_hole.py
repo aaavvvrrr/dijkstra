@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Set, List, Optional
 
 # Настройки по умолчанию
-DEFAULT_EXTENSIONS = {'.py', '.js', '.css', '.html', '.json','','.yml','.yaml','.txt'}
+DEFAULT_EXTENSIONS = {'.py', '.js', '.css', '.html', '.json','','.yml','.yaml','.txt','.md'}
 DEFAULT_IGNORE_FILES = ['fix_locales.py','login.html','ar.json','de.json','ru.json','build_embeddings_index.py','multiview.js',
                         'build_embeddings_index.py','analyse_dataset.py','fix_locales.py','ar.json','de.json','.env','error_report.html','make_tumbnails.py','rare_skus_report.html'
                         ]

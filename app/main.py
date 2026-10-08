@@ -291,7 +291,7 @@ async def websocket_route(websocket: WebSocket):
 
 # Замените эндпоинт get_tile на этот код:
 @app.get("/tiles/{layer}/{z}/{x}/{y}.png")
-def get_tile(layer: str, z: int, x: int, y: int):
+def get_tile(layer: str, z: int, x: int, y: int, draft: Optional[float] = None, max_wave: Optional[float] = None):
     # Выбираем правильный файл
     if layer == "speed":
         filepath = os.path.join(DATA_DIR, "eff_vel_all.tif")
@@ -299,11 +299,11 @@ def get_tile(layer: str, z: int, x: int, y: int):
         filepath = os.path.join(DATA_DIR, "eff_sd_all.tif")
     elif layer == "seca":
         filepath = os.path.join(DATA_DIR, "seca_mask.tif")
-    elif layer == "depth":
+    elif layer in ("depth", "depth_impassable"):
         filepath = os.path.join(DATA_DIR, "depth_meters.tif")
     elif layer == "chokepoints":
         filepath = os.path.join(DATA_DIR, "chokepoints.tif")
-    elif layer == "waves":
+    elif layer in ("waves", "waves_impassable"):
         # Берем путь к волнению прямо из конфига
         wave_path = APP_CONFIG["waves"]["output_file"]
         filepath = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", wave_path))
@@ -319,7 +319,7 @@ def get_tile(layer: str, z: int, x: int, y: int):
         with Reader(filepath) as src:
             # rio-tiler требует параметр indexes=1 для выбора первого слоя (канала).
             # Для глубины используем нативный nodata (-32768), для остальных - 0 (суша/нет данных)
-            if layer == "depth":
+            if layer in ("depth", "depth_impassable"):
                 img = src.tile(x, y, z, indexes=1)
             else:
                 img = src.tile(x, y, z, indexes=1, nodata=0)
@@ -349,10 +349,38 @@ def get_tile(layer: str, z: int, x: int, y: int):
                 img.rescale(in_range=((-5000, 0),))
                 png_bytes = img.render(img_format="PNG", colormap=cmap.get("blues_r"))
                 
+            elif layer == "depth_impassable":
+                if draft is None: return Response(status_code=204)
+                min_depth = draft + 2.0
+                # В GEBCO глубины отрицательные (напр. -15m). Ищем воду (data < 0) мельче лимита (data > -min_depth)
+                mask = (img.data > -min_depth) & (img.data < 0)
+                if mask.ndim == 3: mask = mask[0]  # Убираем измерение каналов (bands)
+                
+                # Создаем RGBA холст (полностью прозрачный) и красим нужные пиксели в красный
+                rgba = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.uint8)
+                rgba[mask] = [239, 68, 68, 200]
+                
+                buf = io.BytesIO()
+                Image.fromarray(rgba).save(buf, format="PNG")
+                png_bytes = buf.getvalue()
+
             elif layer == "waves":
                 # Волны (высота): от 0 до 10 метров. Палитра viridis (от синего к желтому)
                 img.rescale(in_range=((0, 10),))
                 png_bytes = img.render(img_format="PNG", colormap=cmap.get("viridis"))
+                
+            elif layer == "waves_impassable":
+                if max_wave is None: return Response(status_code=204)
+                mask = (img.data > max_wave) & (img.data < 100) # Игнорируем nodata (>100)
+                if mask.ndim == 3: mask = mask[0]
+                
+                # Создаем RGBA холст (полностью прозрачный) и красим нужные пиксели в красный
+                rgba = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.uint8)
+                rgba[mask] = [239, 68, 68, 200]
+                
+                buf = io.BytesIO()
+                Image.fromarray(rgba).save(buf, format="PNG")
+                png_bytes = buf.getvalue()
                 
             elif layer == "speed":
                 # turbo - от синего (медленно) к красному (быстро)

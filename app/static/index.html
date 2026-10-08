@@ -30,7 +30,7 @@
 
         /* Sidebar UI */
         .sidebar {
-            width: 380px;
+            width: 440px;
             background: var(--surface);
             border-right: 1px solid var(--border);
             display: flex;
@@ -159,6 +159,29 @@
         .script-header {
             display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-family: sans-serif;
         }
+        .history-item {
+            padding: 8px; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 8px; cursor: pointer; transition: background 0.2s; font-size: 0.8rem;
+        }
+        .history-item:hover { background: #e2e8f0; }
+        .history-header { font-weight: bold; margin-bottom: 4px; color: var(--primary); }
+        .history-details { color: var(--text-muted); }
+        
+        /* Вкладки (Tabs) */
+        .tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 16px; padding-bottom: 4px; }
+        .tab { flex: 1; text-align: center; padding: 8px 4px; cursor: pointer; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); border-bottom: 2px solid transparent; transition: 0.2s; user-select: none; }
+        .tab:hover { color: var(--text-main); }
+        .tab.active { color: var(--primary); border-bottom: 2px solid var(--primary); }
+        
+        .sidebar-scrollable { flex: 1; overflow-y: auto; padding-right: 8px; display: flex; flex-direction: column; }
+        .tab-content { display: none; flex-direction: column; animation: fadeIn 0.3s ease; }
+        .tab-content.active { display: flex; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* Современный тонкий скроллбар */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
     </style>
     <!-- Chart.js для графиков телеметрии -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -168,129 +191,163 @@
     <aside class="sidebar">
         <div class="header">
             <h1>Maritime Route Finder</h1>
-            <p>Тестовый интерфейс алгоритма поверх растра АИС (A* Spherical)</p>
+            <p>Тестовый интерфейс алгоритма поверх растра АИС</p>
         </div>
 
-        <div class="control-group">
-            <label>Точка А (Старт)</label>
-            <div class="input-row">
-                <input type="text" id="start-lat" placeholder="Широта" readonly style="flex: 1;">
-                <input type="text" id="start-lon" placeholder="Долгота" readonly style="flex: 1;">
-                <input type="text" id="start-unlocode" placeholder="UN/LOCODE" style="flex: 1.2;">
-            </div>
-            <span class="instruction">Кликните на карту или введите UN/LOCODE</span>
+        <div class="tabs">
+            <div class="tab active" data-tab="route">🗺️ Маршрут</div>
+            <div class="tab" data-tab="vessel">🚢 Судно</div>
+            <div class="tab" data-tab="zones">⚠️ Зоны</div>
+            <div class="tab" data-tab="history">🕒 История</div>
         </div>
 
-        <div class="control-group">
-            <label>Точка Б (Финиш)</label>
-            <div class="input-row">
-                <input type="text" id="end-lat" placeholder="Широта" readonly style="flex: 1;">
-                <input type="text" id="end-lon" placeholder="Долгота" readonly style="flex: 1;">
-                <input type="text" id="end-unlocode" placeholder="UN/LOCODE" style="flex: 1.2;">
-            </div>
-            <span class="instruction">Кликните на карту или введите UN/LOCODE</span>
-        </div>
-
-        <div class="control-group">
-            <label>Параметры судна</label>
-             <select id="vessel-type" style="margin-bottom: 8px;">
-                <option value="all">Все типы (По умолчанию)</option>
-                <option value="tanker">Танкер (tanker)</option>
-                <option value="cargo">Грузовое (cargo)</option>
-                <option value="fishing">Рыболовное (fishing)</option>
-                <option value="passenger">Пассажирское (passenger)</option>
-            </select>
-            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                <input type="number" id="vessel-length" placeholder="Длина (м)" min="0">
-                <input type="number" id="vessel-width" placeholder="Ширина (м)" min="0">
-            </div>
-            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                <input type="number" id="vessel-draft" placeholder="Осадка (м) — опц." step="0.1" min="0">
-                <input type="number" id="vessel-speed" placeholder="Ср. скорость (узлы)" step="0.1" min="1">
-            </div>
-            <input type="number" id="max-wave-height" placeholder="Макс. волна (м) — Weather Routing" step="0.5" min="0" style="margin-bottom: 8px; border-color: #f59e0b;">
-        </div>
-
-        <div class="control-group" style="max-height: 256px;overflow: auto;">
-            <label id="chokepoints-label">Исключить узкие места (Chokepoints)</label>
-            <div id="chokepoints-container">
-                <!-- Чекбоксы узких мест будут загружены динамически -->
-            </div>
-        </div>
-
-        <div class="control-group">
-            <label>Отладка: Искусственные циклоны</label>
-            <div style="display: flex; gap: 8px;">
-                <button class="btn" id="add-storm-btn" style="background: #ef4444; color: white;">+ Нарисовать циклон</button>
-                <button class="btn" id="clear-storm-btn" style="background: #64748b; color: white; display: none;">Очистить</button>
-            </div>
-            <span class="instruction" id="storm-instruction" style="display: none; color: #ef4444; font-weight: bold;">Кликните на карту, чтобы разместить шторм</span>
-        </div>
-
-        <div class="control-group">
-            <label>Дополнительные опции</label>
-            <label class="checkbox-label">
-                <input type="checkbox" id="avoid-seca"> Минимизировать проход по зонах SECA
-            </label>
-            <label class="checkbox-label">
-                <input type="checkbox" id="calc-seca"> Рассчитать расстояние в зонах SECA
-            </label>
-            <div style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px;">
-                <label>Притяжение к базовому маршруту</label>
-                <input type="range" id="rubber-band-weight" min="0" max="10" step="0.5" value="0" style="width: 100%;">
-                <span class="instruction">0 - Строить глобально, 10 - Максимально держаться базы</span>
-            </div>
-        </div>
-
-        <div style="display: flex; gap: 8px;">
-            <button class="btn" id="calc-btn" disabled>Построить маршрут</button>
-            <button class="btn" id="cancel-btn" style="background: var(--error); display: none;">Прервать</button>
-        </div>
-        <div id="error-box" class="error-msg"></div>
-
-        <div class="results" id="results-panel">
-            <h3>Атрибуты маршрута</h3>
-            <div class="stat-row">
-                <span>Протяженность:</span>
-                <span class="stat-value" id="res-dist">0 км</span>
-            </div>
-            <div class="stat-row">
-                <span>Средняя скорость:</span>
-                <span class="stat-value" id="res-speed">0 км/ч</span>
-            </div>
-            <div class="stat-row" id="res-seca-row" style="display: none; color: #d97706;">
-                <span>Дистанция по SECA:</span>
-                <span class="stat-value" id="res-seca-dist">0 км</span>
-            </div>
-
-            <h3 style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px;">Прогноз времени (Монте-Карло)</h3>
-            <div class="stat-row" style="color: #10b981;">
-                <span>Оптимистичный (5%):</span>
-                <span class="stat-value" id="res-time-opt">0 ч</span>
-            </div>
-            <div class="stat-row" style="font-size: 1rem; color: var(--primary);">
-                <span>Ожидаемое (Среднее):</span>
-                <span class="stat-value" id="res-time-mean">0 ч</span>
-            </div>
-            <div class="stat-row" style="color: #ef4444;">
-                <span>Пессимистичный (95%):</span>
-                <span class="stat-value" id="res-time-pess">0 ч</span>
-            </div>
-            
-            <!-- Контейнер для графика телеметрии -->
-            <div id="chart-wrapper" style="position: relative; height: 180px; width: 100%; margin-top: 16px; display: none;">
-                <canvas id="telemetry-chart"></canvas>
-            </div>
-
-            <button class="btn" id="save-test-btn" style="margin-top: 16px; background: #10b981; display: none;">💾 Сохранить как автотест</button>
-            <button class="btn" id="set-ref-btn" style="margin-top: 8px; background: #8b5cf6; display: none;">📌 Зафиксировать как базовый</button>
-
-            <div id="script-container" class="script-panel">
-                <div class="script-header">
-                    <span>Python API Скрипт</span>
-                    <span style="font-size: 0.75rem; color: #94a3b8;">Выделите текст и нажмите Ctrl+C</span>
+        <div class="sidebar-scrollable">
+            <!-- Вкладка 1: Основной Маршрут -->
+            <div class="tab-content active" id="tab-route">
+                <div class="control-group">
+                    <label>Точка А (Старт)</label>
+                    <div class="input-row">
+                        <input type="text" id="start-lat" placeholder="Широта" readonly style="flex: 1;">
+                        <input type="text" id="start-lon" placeholder="Долгота" readonly style="flex: 1;">
+                        <input type="text" id="start-unlocode" placeholder="UN/LOCODE" style="flex: 1.2;">
+                    </div>
+                    <span class="instruction">Кликните на карту или введите UN/LOCODE</span>
                 </div>
-                <code id="script-code" style="user-select: all; cursor: text;"></code>
+
+                <div class="control-group">
+                    <label>Точка Б (Финиш)</label>
+                    <div class="input-row">
+                        <input type="text" id="end-lat" placeholder="Широта" readonly style="flex: 1;">
+                        <input type="text" id="end-lon" placeholder="Долгота" readonly style="flex: 1;">
+                        <input type="text" id="end-unlocode" placeholder="UN/LOCODE" style="flex: 1.2;">
+                    </div>
+                </div>
+
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn" id="calc-btn" disabled>Построить маршрут</button>
+                    <button class="btn" id="cancel-btn" style="background: var(--error); display: none;">Прервать</button>
+                </div>
+                <div id="error-box" class="error-msg"></div>
+
+                <div class="results" id="results-panel">
+                    <h3>Атрибуты маршрута</h3>
+                    <div class="stat-row">
+                        <span>Протяженность:</span>
+                        <span class="stat-value" id="res-dist">0 км</span>
+                    </div>
+                    <div class="stat-row">
+                        <span>Средняя скорость:</span>
+                        <span class="stat-value" id="res-speed">0 км/ч</span>
+                    </div>
+                    <div class="stat-row" id="res-seca-row" style="display: none; color: #d97706;">
+                        <span>Дистанция по SECA:</span>
+                        <span class="stat-value" id="res-seca-dist">0 км</span>
+                    </div>
+
+                    <h3 style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px;">Прогноз времени</h3>
+                    <div class="stat-row" style="color: #10b981;">
+                        <span>Оптимистичный (5%):</span>
+                        <span class="stat-value" id="res-time-opt">0 ч</span>
+                    </div>
+                    <div class="stat-row" style="font-size: 1rem; color: var(--primary);">
+                        <span>Ожидаемое (Среднее):</span>
+                        <span class="stat-value" id="res-time-mean">0 ч</span>
+                    </div>
+                    <div class="stat-row" style="color: #ef4444;">
+                        <span>Пессимистичный (95%):</span>
+                        <span class="stat-value" id="res-time-pess">0 ч</span>
+                    </div>
+                    
+                    <div id="chart-wrapper" style="position: relative; height: 180px; width: 100%; margin-top: 16px; display: none;">
+                        <canvas id="telemetry-chart"></canvas>
+                    </div>
+
+                    <div style="display: flex; gap: 8px; margin-top: 16px;">
+                        <button class="btn" id="save-test-btn" style="background: #10b981; display: none; font-size: 0.85rem; padding: 8px;">💾 Автотест</button>
+                        <button class="btn" id="set-ref-btn" style="background: #8b5cf6; display: none; font-size: 0.85rem; padding: 8px;">📌 Базовый маршрут</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Вкладка 2: Судно и Погода -->
+            <div class="tab-content" id="tab-vessel">
+                <div class="control-group">
+                    <label>Параметры судна</label>
+                     <select id="vessel-type" style="margin-bottom: 8px;">
+                        <option value="all">Все типы (По умолчанию)</option>
+                        <option value="tanker">Танкер (tanker)</option>
+                        <option value="cargo">Грузовое (cargo)</option>
+                        <option value="fishing">Рыболовное (fishing)</option>
+                        <option value="passenger">Пассажирское (passenger)</option>
+                    </select>
+                    <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                        <input type="number" id="vessel-length" placeholder="Длина (м)" min="0">
+                        <input type="number" id="vessel-width" placeholder="Ширина (м)" min="0">
+                    </div>
+                    <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                        <input type="number" id="vessel-draft" placeholder="Осадка (м) — опц." step="0.1" min="0">
+                        <input type="number" id="vessel-speed" placeholder="Ср. скорость (узлы)" step="0.1" min="1">
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Погода (Weather Routing)</label>
+                    <input type="number" id="max-wave-height" placeholder="Макс. волна (м)" step="0.5" min="0" style="border-color: #f59e0b;">
+                    <span class="instruction" style="color: #f59e0b;">Огибание штормов включится автоматически</span>
+                </div>
+                
+                <div class="control-group">
+                    <label>Экология (SECA)</label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="avoid-seca"> Минимизировать проход по зонам SECA
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="calc-seca"> Рассчитать расстояние в зонах SECA
+                    </label>
+                </div>
+            </div>
+
+            <!-- Вкладка 3: Ограничения -->
+            <div class="tab-content" id="tab-zones">
+                <div class="control-group" style="max-height: 200px; overflow: auto; border-bottom: 1px solid var(--border); padding-bottom: 12px;">
+                    <label id="chokepoints-label">Узкие места (Chokepoints)</label>
+                    <span class="instruction" style="margin-bottom: 8px;">Выберите шлюзы/каналы для запрета прохода</span>
+                    <div id="chokepoints-container">
+                        <!-- Чекбоксы узких мест будут загружены динамически -->
+                    </div>
+                </div>
+
+                <div class="control-group" style="margin-top: 12px;">
+                    <label>Отладка: Искусственные циклоны</label>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn" id="add-storm-btn" style="background: #ef4444; color: white;">+ Нарисовать циклон</button>
+                        <button class="btn" id="clear-storm-btn" style="background: #64748b; color: white; display: none;">Очистить</button>
+                    </div>
+                </div>
+
+                <div class="control-group" style="margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px;">
+                    <label>Притяжение (Rubber-banding)</label>
+                    <input type="range" id="rubber-band-weight" min="0" max="10" step="0.5" value="0" style="width: 100%;">
+                    <span class="instruction">0 - Строить глобально, 10 - Максимально держаться базы</span>
+                </div>
+            </div>
+
+            <!-- Вкладка 4: История и Скрипты -->
+            <div class="tab-content" id="tab-history">
+                <div class="control-group">
+                    <label>Последние маршруты</label>
+                    <div id="history-container">
+                        <span style="font-size: 0.8rem; color: var(--text-muted);">История пуста</span>
+                    </div>
+                </div>
+
+                <div id="script-container" class="script-panel">
+                    <div class="script-header">
+                        <span>Python API Скрипт</span>
+                        <span style="font-size: 0.75rem; color: #94a3b8;">Выделите и скопируйте</span>
+                    </div>
+                    <code id="script-code" style="user-select: all; cursor: text;"></code>
+                </div>
             </div>
         </div>
     </aside>
@@ -317,6 +374,9 @@
         const chokepointsLayer = L.tileLayer('/tiles/chokepoints/{z}/{x}/{y}.png', { opacity: 0.8, maxZoom: 10 });
         const debugGridLayer = L.tileLayer('/tiles/debug/{z}/{x}/{y}.png', { opacity: 0.7, maxZoom: 10 });
 
+        const depthImpassableLayer = L.tileLayer('/tiles/depth_impassable/{z}/{x}/{y}.png', { opacity: 0.8, maxZoom: 10 });
+        const wavesImpassableLayer = L.tileLayer('/tiles/waves_impassable/{z}/{x}/{y}.png', { opacity: 0.8, maxZoom: 10 });
+
         const overlayMaps = {
             "Детализация: Скорость": effSpeedLayer,
             "Детализация: Дисперсия": effSdLayer,
@@ -324,7 +384,9 @@
             "Волнение (Погода)": wavesLayer,
             "Зоны SECA": secaLayer,
             "Узкие места (Chokepoints)": chokepointsLayer,
-            "Связность морей (Грубая)": debugGridLayer
+            "Связность морей (Грубая)": debugGridLayer,
+            "⚠️ Непроходимые глубины": depthImpassableLayer,
+            "⚠️ Опасное волнение": wavesImpassableLayer
         };
         L.control.layers({"Базовая карта": baseMap}, overlayMaps, {collapsed: false}).addTo(map);
 
@@ -489,6 +551,16 @@
         const resultsPanel = document.getElementById('results-panel');
         const errorBox = document.getElementById('error-box');
 
+        // Логика переключения вкладок
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+            });
+        });
+
         // Разблокировка кнопки при вводе UNLOCODE
         const checkUnlocode = () => {
             const hasStart = coords.start || inputs.startUnlocode.value;
@@ -497,6 +569,29 @@
         };
         inputs.startUnlocode.addEventListener('input', checkUnlocode);
         inputs.endUnlocode.addEventListener('input', checkUnlocode);
+
+        // Динамическая подсветка непроходимых зон
+        function updateImpassableLayers() {
+            const draft = document.getElementById('vessel-draft').value;
+            const maxWave = document.getElementById('max-wave-height').value;
+
+            if (draft && parseFloat(draft) > 0) {
+                depthImpassableLayer.setUrl(`/tiles/depth_impassable/{z}/{x}/{y}.png?draft=${draft}`);
+                if (!map.hasLayer(depthImpassableLayer)) map.addLayer(depthImpassableLayer);
+            } else {
+                if (map.hasLayer(depthImpassableLayer)) map.removeLayer(depthImpassableLayer);
+            }
+
+            if (maxWave && parseFloat(maxWave) > 0) {
+                wavesImpassableLayer.setUrl(`/tiles/waves_impassable/{z}/{x}/{y}.png?max_wave=${maxWave}`);
+                if (!map.hasLayer(wavesImpassableLayer)) map.addLayer(wavesImpassableLayer);
+            } else {
+                if (map.hasLayer(wavesImpassableLayer)) map.removeLayer(wavesImpassableLayer);
+            }
+        }
+
+        document.getElementById('vessel-draft').addEventListener('input', updateImpassableLayers);
+        document.getElementById('max-wave-height').addEventListener('input', updateImpassableLayers);
 
         // Обработка клика
         map.on('click', (e) => {
@@ -640,70 +735,6 @@
 
                 // Отправляем старт
                 ws.send(JSON.stringify(requestPayload));
-
-                // Генерируем Python скрипт
-                const scriptHost = window.location.origin;
-                const pyPayload = { ...requestPayload };
-                delete pyPayload.action;
-                
-                // Конвертируем JSON в валидный синтаксис Python словаря
-                const payloadStr = JSON.stringify(pyPayload, null, 4)
-                    .replace(/: null/g, ': None')
-                    .replace(/: false/g, ': False')
-                    .replace(/: true/g, ': True');
-                    
-                let featureComments = "";
-                if (pyPayload.manual_storms && pyPayload.manual_storms.length > 0) {
-                    featureComments += "# 🌪️ ВНИМАНИЕ: Тест включает искусственные штормы (обход циклонов)!\n";
-                }
-                if (pyPayload.reference_route && pyPayload.rubber_band_weight > 0) {
-                    featureComments += "# 📌 ВНИМАНИЕ: Включен режим Rubber-Banding (притяжение к базовому маршруту)!\n";
-                }
-
-                const pyScript = `import requests
-import json
-import os
-
-${featureComments}url = "${scriptHost}/api/route"
-payload = ${payloadStr}
-expected_file = "expected_route.json"
-
-response = requests.post(url, json=payload)
-if response.status_code == 200:
-    result = response.json()
-    props = result.get("properties", {})
-    
-    if not os.path.exists(expected_file):
-        with open(expected_file, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        print(f"✅ Эталонный маршрут сохранен в {expected_file}")
-        print("При следующем запуске скрипта этот файл будет использован для проверки.")
-    else:
-        with open(expected_file, "r", encoding="utf-8") as f:
-            expected = json.load(f)
-        
-        exp_props = expected.get("properties", {})
-        
-        # Нечеткое сравнение (допуск 5%)
-        dist = props.get("distance_total_km", 0)
-        exp_dist = exp_props.get("distance_total_km", 0)
-        dist_diff = abs(dist - exp_dist) / max(exp_dist, 1)
-        
-        time_val = props.get("time_total_hours", 0)
-        exp_time = exp_props.get("time_total_hours", 0)
-        time_diff = abs(time_val - exp_time) / max(exp_time, 1)
-        
-        print(f"Дистанция: {dist:.2f} км (Эталон: {exp_dist:.2f} км) | Разница: {dist_diff:.1%}")
-        print(f"Время: {time_val:.2f} ч (Эталон: {exp_time:.2f} ч) | Разница: {time_diff:.1%}")
-        
-        if dist_diff <= 0.05 and time_diff <= 0.05:
-            print("✅ ТЕСТ ПРОЙДЕН! Отклонения в пределах нормы.")
-        else:
-            print("❌ ТЕСТ ПРОВАЛЕН! Слишком большое отклонение.")
-else:
-    print("Ошибка API:", response.status_code, response.text)
-`;
-                document.getElementById('script-code').innerText = pyScript;
             };
 
             ws.onmessage = (event) => {
@@ -725,58 +756,7 @@ else:
                 else if (data.type === 'result') {
                     if (progressPolyline) { map.removeLayer(progressPolyline); progressPolyline = null; }
                     
-                    const geojson = data.geojson;
-                    lastGeojson = geojson;
-                    document.getElementById('save-test-btn').style.display = 'block';
-
-                    routeLayer = L.geoJSON(geojson, {
-                        style: { color: '#2563eb', weight: 5, opacity: 0.9, dashArray: '8, 8' }
-                    }).addTo(map);
-
-                    map.fitBounds(routeLayer.getBounds(), { padding: [50, 50] });
-
-                    const props = geojson.properties;
-                    document.getElementById('res-dist').innerText = props.distance_total_km + ' км';
-                    document.getElementById('res-speed').innerText = props.avg_speed_kmh + ' км/ч';
-                    document.getElementById('res-time-opt').innerText = props.time_optimistic_hours + ' ч';
-                    document.getElementById('res-time-mean').innerText = props.time_total_hours + ' ч';
-                    document.getElementById('res-time-pess').innerText = props.time_pessimistic_hours + ' ч';
-
-                    const secaRow = document.getElementById('res-seca-row');
-                    if (props.seca_distance_km !== undefined) {
-                        document.getElementById('res-seca-dist').innerText = props.seca_distance_km + ' км';
-                        secaRow.style.display = 'flex';
-                    } else {
-                        secaRow.style.display = 'none';
-                    }
-
-                    if (props.actual_start_lonlat) {
-                        if (markers.start) {
-                            markers.start.setLatLng([props.actual_start_lonlat[1], props.actual_start_lonlat[0]]);
-                        } else {
-                            markers.start = L.marker([props.actual_start_lonlat[1], props.actual_start_lonlat[0]]).addTo(map).bindPopup("Старт").openPopup();
-                        }
-                    }
-                    if (props.actual_end_lonlat) {
-                        if (markers.end) {
-                            markers.end.setLatLng([props.actual_end_lonlat[1], props.actual_end_lonlat[0]]);
-                        } else {
-                            markers.end = L.marker([props.actual_end_lonlat[1], props.actual_end_lonlat[0]]).addTo(map).bindPopup("Финиш").openPopup();
-                        }
-                    }
-                    
-                    // Отрисовка графиков телеметрии
-                    const segments = props.segments || {};
-                    const chartWrapper = document.getElementById('chart-wrapper');
-                    if (segments.depths_m && segments.waves_m && segments.depths_m.length > 0) {
-                        chartWrapper.style.display = 'block';
-                        renderTelemetryChart(segments);
-                    } else {
-                        chartWrapper.style.display = 'none';
-                    }
-                    
-                    document.getElementById('set-ref-btn').style.display = 'block';
-                    document.getElementById('script-container').classList.add('active');
+                    renderRouteData(data.geojson, lastPayload);
                     ws.close();
                 } 
                 else if (data.type === 'error' || data.type === 'info') {
@@ -797,6 +777,242 @@ else:
                 const hasEnd = coords.end || inputs.endUnlocode.value;
                 currentStep = (hasStart && hasEnd) ? 'ready' : currentStep;
             };
+        });
+
+        function generatePythonScript(reqPayload) {
+            const scriptHost = window.location.origin;
+            const pyPayload = { ...reqPayload };
+            delete pyPayload.action;
+            
+            const payloadStr = JSON.stringify(pyPayload, null, 4)
+                .replace(/: null/g, ': None')
+                .replace(/: false/g, ': False')
+                .replace(/: true/g, ': True');
+                
+            let featureComments = "";
+            if (pyPayload.manual_storms && pyPayload.manual_storms.length > 0) {
+                featureComments += "# 🌪️ ВНИМАНИЕ: Тест включает искусственные штормы (обход циклонов)!\n";
+            }
+            if (pyPayload.reference_route && pyPayload.rubber_band_weight > 0) {
+                featureComments += "# 📌 ВНИМАНИЕ: Включен режим Rubber-Banding (притяжение к базовому маршруту)!\n";
+            }
+
+            const pyScript = `import requests
+import json
+import os
+
+${featureComments}url = "${scriptHost}/api/route"
+payload = ${payloadStr}
+expected_file = "expected_route.json"
+
+response = requests.post(url, json=payload)
+if response.status_code == 200:
+    result = response.json()
+    props = result.get("properties", {})
+    
+    if not os.path.exists(expected_file):
+        with open(expected_file, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        print(f"✅ Эталонный маршрут сохранен в {expected_file}")
+    else:
+        with open(expected_file, "r", encoding="utf-8") as f:
+            expected = json.load(f)
+        
+        exp_props = expected.get("properties", {})
+        dist = props.get("distance_total_km", 0)
+        exp_dist = exp_props.get("distance_total_km", 0)
+        dist_diff = abs(dist - exp_dist) / max(exp_dist, 1)
+        
+        time_val = props.get("time_total_hours", 0)
+        exp_time = exp_props.get("time_total_hours", 0)
+        time_diff = abs(time_val - exp_time) / max(exp_time, 1)
+        
+        print(f"Дистанция: {dist:.2f} км (Эталон: {exp_dist:.2f} км) | Разница: {dist_diff:.1%}")
+        print(f"Время: {time_val:.2f} ч (Эталон: {exp_time:.2f} ч) | Разница: {time_diff:.1%}")
+        
+        if dist_diff <= 0.05 and time_diff <= 0.05:
+            print("✅ ТЕСТ ПРОЙДЕН! Отклонения в пределах нормы.")
+        else:
+            print("❌ ТЕСТ ПРОВАЛЕН! Слишком большое отклонение.")
+else:
+    print("Ошибка API:", response.status_code, response.text)
+`;
+            document.getElementById('script-code').innerText = pyScript;
+        }
+
+        function restoreFormState(payload) {
+            if (payload.start_lon !== undefined) coords.start = { lon: payload.start_lon, lat: payload.start_lat };
+            if (payload.end_lon !== undefined) coords.end = { lon: payload.end_lon, lat: payload.end_lat };
+            inputs.startLat.value = payload.start_lat !== undefined ? payload.start_lat : '';
+            inputs.startLon.value = payload.start_lon !== undefined ? payload.start_lon : '';
+            inputs.startUnlocode.value = payload.start_unlocode || '';
+            inputs.endLat.value = payload.end_lat !== undefined ? payload.end_lat : '';
+            inputs.endLon.value = payload.end_lon !== undefined ? payload.end_lon : '';
+            inputs.endUnlocode.value = payload.end_unlocode || '';
+            
+            document.getElementById('vessel-type').value = payload.vessel_type || 'all';
+            document.getElementById('vessel-length').value = payload.vessel_length || '';
+            document.getElementById('vessel-width').value = payload.vessel_width || '';
+            document.getElementById('vessel-draft').value = payload.draft || '';
+            document.getElementById('vessel-speed').value = payload.average_speed || '';
+            document.getElementById('max-wave-height').value = payload.max_wave_height || '';
+            document.getElementById('avoid-seca').checked = !!payload.avoid_seca;
+            document.getElementById('calc-seca').checked = !!payload.calc_seca;
+            document.getElementById('rubber-band-weight').value = payload.rubber_band_weight || 0;
+            
+            const cps = payload.forbidden_chokepoints || [];
+            document.querySelectorAll('.forbidden-cp').forEach(cb => {
+                cb.checked = cps.includes(parseInt(cb.value));
+            });
+
+            // Восстанавливаем искусственные штормы (визуально и в state)
+            manualStorms = payload.manual_storms || [];
+            stormLayers.clearLayers();
+            manualStorms.forEach(storm => {
+                L.circle([storm.lat, storm.lon], { 
+                    radius: (storm.radius_km || 300) * 1000, 
+                    color: '#ef4444', 
+                    fillColor: '#ef4444', 
+                    fillOpacity: 0.4,
+                    weight: 2
+                }).addTo(stormLayers);
+            });
+            document.getElementById('clear-storm-btn').style.display = manualStorms.length > 0 ? 'block' : 'none';
+
+            // Восстанавливаем базовый маршрут (серая линия)
+            referenceRouteCoords = payload.reference_route || null;
+            if (referenceRouteLayer) { map.removeLayer(referenceRouteLayer); referenceRouteLayer = null; }
+            if (referenceRouteCoords) {
+                const refGeoJson = {
+                    "type": "Feature",
+                    "geometry": { "type": "LineString", "coordinates": referenceRouteCoords }
+                };
+                referenceRouteLayer = L.geoJSON(refGeoJson, {
+                    style: { color: '#64748b', weight: 6, opacity: 0.5 }
+                }).addTo(map);
+            }
+
+            checkUnlocode();
+            updateImpassableLayers();
+            currentStep = 'ready';
+        }
+
+        function renderRouteData(geojson, reqPayload, isHistoryLoad = false) {
+            if (routeLayer) map.removeLayer(routeLayer);
+            lastGeojson = geojson;
+            lastPayload = reqPayload;
+            
+            document.getElementById('save-test-btn').style.display = 'block';
+
+            routeLayer = L.geoJSON(geojson, {
+                style: { color: '#2563eb', weight: 5, opacity: 0.9, dashArray: '8, 8' }
+            }).addTo(map);
+
+            map.fitBounds(routeLayer.getBounds(), { padding: [50, 50] });
+
+            const props = geojson.properties;
+            document.getElementById('res-dist').innerText = props.distance_total_km + ' км';
+            document.getElementById('res-speed').innerText = props.avg_speed_kmh + ' км/ч';
+            document.getElementById('res-time-opt').innerText = props.time_optimistic_hours + ' ч';
+            document.getElementById('res-time-mean').innerText = props.time_total_hours + ' ч';
+            document.getElementById('res-time-pess').innerText = props.time_pessimistic_hours + ' ч';
+
+            const secaRow = document.getElementById('res-seca-row');
+            if (props.seca_distance_km !== undefined) {
+                document.getElementById('res-seca-dist').innerText = props.seca_distance_km + ' км';
+                secaRow.style.display = 'flex';
+            } else {
+                secaRow.style.display = 'none';
+            }
+
+            if (props.actual_start_lonlat) {
+                if (markers.start) {
+                    markers.start.setLatLng([props.actual_start_lonlat[1], props.actual_start_lonlat[0]]);
+                } else {
+                    markers.start = L.marker([props.actual_start_lonlat[1], props.actual_start_lonlat[0]]).addTo(map).bindPopup("Старт").openPopup();
+                }
+            }
+            if (props.actual_end_lonlat) {
+                if (markers.end) {
+                    markers.end.setLatLng([props.actual_end_lonlat[1], props.actual_end_lonlat[0]]);
+                } else {
+                    markers.end = L.marker([props.actual_end_lonlat[1], props.actual_end_lonlat[0]]).addTo(map).bindPopup("Финиш").openPopup();
+                }
+            }
+            
+            const segments = props.segments || {};
+            const chartWrapper = document.getElementById('chart-wrapper');
+            if (segments.depths_m && segments.waves_m && segments.depths_m.length > 0) {
+                chartWrapper.style.display = 'block';
+                renderTelemetryChart(segments);
+            } else {
+                chartWrapper.style.display = 'none';
+            }
+            
+            generatePythonScript(reqPayload);
+            
+            document.getElementById('set-ref-btn').style.display = 'block';
+            document.getElementById('script-container').classList.add('active');
+            resultsPanel.classList.add('active');
+
+            // Автоматическое сохранение маршрута в историю
+            if (!isHistoryLoad) {
+                saveRouteToHistory(geojson, reqPayload);
+            }
+        }
+
+        function saveRouteToHistory(geojson, reqPayload) {
+            let history = JSON.parse(localStorage.getItem('routeHistory') || '[]');
+            const historyItem = {
+                id: Date.now(),
+                date: new Date().toLocaleString(),
+                payload: reqPayload,
+                geojson: geojson
+            };
+            history.unshift(historyItem);
+            if (history.length > 10) history = history.slice(0, 10); // Храним только 10 последних
+            localStorage.setItem('routeHistory', JSON.stringify(history));
+            renderHistoryList();
+        }
+
+        function renderHistoryList() {
+            const container = document.getElementById('history-container');
+            let history = JSON.parse(localStorage.getItem('routeHistory') || '[]');
+            
+            if (history.length === 0) {
+                container.innerHTML = '<span style="font-size: 0.8rem; color: var(--text-muted);">История пуста</span>';
+                return;
+            }
+            
+            container.innerHTML = '';
+            history.forEach((item) => {
+                const div = document.createElement('div');
+                div.className = 'history-item';
+                const dist = item.geojson.properties.distance_total_km;
+                const time = item.geojson.properties.time_total_hours;
+                div.innerHTML = `
+                    <div class="history-header">Маршрут ${item.date}</div>
+                    <div class="history-details">Дистанция: ${dist} км | Время: ${time} ч</div>
+                `;
+                div.addEventListener('click', () => {
+                    restoreFormState(item.payload);
+                    renderRouteData(item.geojson, item.payload, true);
+                });
+                container.appendChild(div);
+            });
+        }
+
+        // Восстановление истории при загрузке (с задержкой для загрузки узких мест)
+        window.addEventListener('DOMContentLoaded', () => {
+            setTimeout(() => {
+                renderHistoryList();
+                let history = JSON.parse(localStorage.getItem('routeHistory') || '[]');
+                if (history.length > 0) {
+                    const latest = history[0];
+                    restoreFormState(latest.payload);
+                    renderRouteData(latest.geojson, latest.payload, true);
+                }
+            }, 300);
         });
 
         // Обработчик кнопки сохранения автотеста
